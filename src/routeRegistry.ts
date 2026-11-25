@@ -4,6 +4,7 @@ import {
   formatRelativeUrl,
   generatePathFromPattern,
   normalizeHash,
+  normalizePathname,
   normalizeQueryInput,
   parseRelativeUrl,
   safeDecode,
@@ -13,13 +14,29 @@ import type {
   NavigationTarget,
   QueryParams,
   ReactNavigationLinkingConfig,
+  QueryInput,
   ResolvedNavigationIntent,
   RouteConfigMap,
   RouteDefinition,
   RouteMatchResult,
   RouteParams,
   RouteRegistry,
+  UnifiedRoute,
 } from './types';
+
+const SEGMENT = /^(?:[^:*?()+]+|:\w+\??|\*)$/;
+
+/** Only `/static`, `/:param`, `/:param?` and a trailing `/*` are supported, identically on both platforms. */
+function validatePattern(name: string, path: string): void {
+  const segments = path.replace(/^\/+|\/+$/g, '').split('/').filter(Boolean);
+  segments.forEach((segment, idx) => {
+    if (!SEGMENT.test(segment) || (segment === '*' && idx !== segments.length - 1)) {
+      throw new Error(
+        `[react-router-navigation-adapter] Route "${name}" has unsupported path segment "${segment}" in "${path}". Use "/static", "/:param", "/:param?" or a trailing "/*".`,
+      );
+    }
+  });
+}
 
 interface CompiledRouteEntry<TName extends string> {
   definition: RouteDefinition<TName>;
@@ -57,6 +74,7 @@ export function defineRoutes<TMap extends RouteConfigMap>(
   const byName = new Map<string, CompiledRouteEntry<TName>>();
 
   for (const [name, routeConfig] of Object.entries(config)) {
+    validatePattern(name, routeConfig.path);
     const definition: RouteDefinition<TName> = {
       ...routeConfig,
       name: name as TName,
@@ -72,6 +90,16 @@ export function defineRoutes<TMap extends RouteConfigMap>(
       paramNames: extractParamNames(definition.path),
       regex: compiled.regex,
     };
+    // Matching is first-match in declaration order (like React Router's <Switch>).
+    // Warn when a static route can never match because an earlier route already does.
+    if (entry.paramNames.length === 0) {
+      const shadowing = entries.find((e) => e.regex.test(normalizePathname(definition.path)));
+      if (shadowing && typeof console !== 'undefined') {
+        console.warn(
+          `[react-router-navigation-adapter] Route "${name}" (${definition.path}) is unreachable: "${shadowing.definition.name}" (${shadowing.definition.path}) is declared earlier and matches first. Declare "${name}" before it.`,
+        );
+      }
+    }
     entries.push(entry);
     byName.set(name, entry);
   }
@@ -136,6 +164,45 @@ export function defineRoutes<TMap extends RouteConfigMap>(
     return null;
   };
 
+  /** Params that are not path params of the route become query params (same on both platforms). */
+  const splitParams = (
+    entry: CompiledRouteEntry<TName>,
+    params: RouteParams,
+  ): { pathParams: RouteParams; extraQuery: QueryParams } => {
+    const pathParams: RouteParams = {};
+    const extra: QueryInput = {};
+    for (const [key, value] of Object.entries(params)) {
+      if (entry.paramNames.includes(key)) pathParams[key] = value;
+      else extra[key] = value as QueryInput[string];
+    }
+    return { pathParams, extraQuery: normalizeQueryInput(extra) };
+  };
+
+  const fromEntry = (
+    entry: CompiledRouteEntry<TName>,
+    params: RouteParams,
+    query: QueryParams,
+    hash: string,
+    state: unknown,
+  ): ResolvedNavigationIntent<TName> => {
+    const { pathParams, extraQuery } = splitParams(entry, params);
+    const mergedQuery = { ...extraQuery, ...query };
+    const pathname = generatePathFromPattern(
+      entry.definition.path,
+      pathParams,
+      entry.definition.stringify,
+    );
+    return {
+      name: entry.definition.name,
+      params: pathParams,
+      query: mergedQuery,
+      hash,
+      state,
+      pathname,
+      path: formatRelativeUrl(pathname, mergedQuery, hash),
+    };
+  };
+
   const resolveTarget = (
     target: NavigationTarget<TName>,
     params?: RouteParams,
@@ -143,63 +210,31 @@ export function defineRoutes<TMap extends RouteConfigMap>(
   ): ResolvedNavigationIntent<TName> => {
     // Case 1: Object target { name, params, query, hash, state }
     if (typeof target === 'object' && target !== null) {
-      const mergedParams: RouteParams = {
-        ...(target.params ?? {}),
-        ...(params ?? {}),
-      };
-      const mergedQuery: QueryParams = {
-        ...normalizeQueryInput(target.query),
-        ...normalizeQueryInput(options?.query),
-      };
-      const hash = normalizeHash(options?.hash ?? target.hash);
-      const state = options?.state !== undefined ? options.state : target.state;
-
       const entry = byName.get(target.name);
       if (!entry) {
         throw new Error(
           `[react-router-navigation-adapter] Unknown route name "${String(target.name)}".`,
         );
       }
-
-      const pathname = generatePathFromPattern(
-        entry.definition.path,
-        mergedParams,
-        entry.definition.stringify,
+      return fromEntry(
+        entry,
+        { ...(target.params ?? {}), ...(params ?? {}) },
+        { ...normalizeQueryInput(target.query), ...normalizeQueryInput(options?.query) },
+        normalizeHash(options?.hash ?? target.hash),
+        options?.state !== undefined ? options.state : target.state,
       );
-      const path = formatRelativeUrl(pathname, mergedQuery, hash);
-
-      return {
-        name: entry.definition.name,
-        params: mergedParams,
-        query: mergedQuery,
-        hash,
-        state,
-        pathname,
-        path,
-      };
     }
 
     // Case 2: Registered route name string (e.g. "UserProfile")
-    if (byName.has(target)) {
-      const entry = byName.get(target)!;
-      const resolvedParams = params ?? {};
-      const resolvedQuery = normalizeQueryInput(options?.query);
-      const hash = normalizeHash(options?.hash);
-      const pathname = generatePathFromPattern(
-        entry.definition.path,
-        resolvedParams,
-        entry.definition.stringify,
+    const named = byName.get(target);
+    if (named) {
+      return fromEntry(
+        named,
+        params ?? {},
+        normalizeQueryInput(options?.query),
+        normalizeHash(options?.hash),
+        options?.state,
       );
-      const path = formatRelativeUrl(pathname, resolvedQuery, hash);
-      return {
-        name: entry.definition.name,
-        params: resolvedParams,
-        query: resolvedQuery,
-        hash,
-        state: options?.state,
-        pathname,
-        path,
-      };
     }
 
     // Case 3: Relative URL path string (e.g. "/users/42?tab=posts#bio")
@@ -214,15 +249,13 @@ export function defineRoutes<TMap extends RouteConfigMap>(
       const matched = matchUrl(fullUrl);
 
       if (matched) {
-        return {
-          name: matched.name,
-          params: { ...matched.params, ...(params ?? {}) },
-          query: matched.query,
-          hash: matched.hash,
-          state: options?.state,
-          pathname: matched.pathname,
-          path: matched.path,
-        };
+        return fromEntry(
+          byName.get(matched.name)!,
+          { ...matched.params, ...(params ?? {}) },
+          matched.query,
+          matched.hash,
+          options?.state,
+        );
       }
 
       return {
@@ -241,10 +274,19 @@ export function defineRoutes<TMap extends RouteConfigMap>(
     );
   };
 
+  const resolveParent = (
+    route: UnifiedRoute<TName>,
+  ): ResolvedNavigationIntent<TName> | null => {
+    const parent = route.name ? byName.get(route.name)?.definition.parent : undefined;
+    if (!parent) return null;
+    return resolveTarget((typeof parent === 'function' ? parent(route) : parent) as NavigationTarget<TName>);
+  };
+
   const toLinkingConfig = (prefixes: string[] = []): ReactNavigationLinkingConfig => {
     const screens: ReactNavigationLinkingConfig['config']['screens'] = {};
     for (const entry of entries) {
       const { definition } = entry;
+      if (!definition.native) continue;
       screens[definition.name] = {
         path: toReactNavigationPath(definition.path),
         ...(definition.exact !== undefined ? { exact: definition.exact } : {}),
@@ -265,6 +307,7 @@ export function defineRoutes<TMap extends RouteConfigMap>(
     getParamNames,
     buildPath,
     matchUrl,
+    resolveParent,
     resolveTarget,
     toLinkingConfig,
   };

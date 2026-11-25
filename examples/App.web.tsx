@@ -1,28 +1,13 @@
-import { defineRoutes } from '../src/index.web';
 import { RouterProvider, RouterView } from '../src/index.web';
-import {
-  HomeScreen,
-  SettingsScreen,
-  UserProfileScreen,
-} from './SharedScreens';
-
-const webRoutes = defineRoutes({
-  Home: { path: '/', component: HomeScreen },
-  UserProfile: {
-    path: '/users/:id',
-    parse: { id: Number },
-    stringify: { id: (id: number) => String(id) },
-    component: UserProfileScreen,
-  },
-  Settings: { path: '/settings/:section?', component: SettingsScreen },
-});
+import { routes } from './routes';
 
 /**
- * Web entrypoint: uses React Router v5 (<BrowserRouter>, <Switch>, <Route>, <a href>).
+ * Web: inside the MFE's existing React Router v5 `<Router>`, the provider attaches to it.
+ * Without one it mounts a `<BrowserRouter>`.
  */
 export function WebApp() {
   return (
-    <RouterProvider routes={webRoutes}>
+    <RouterProvider routes={routes}>
       <RouterView fallback={() => <div>404 Not Found</div>} />
     </RouterProvider>
   );

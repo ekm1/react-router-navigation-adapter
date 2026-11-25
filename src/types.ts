@@ -34,6 +34,17 @@ export interface RouteConfigInput {
   parse?: Record<string, (raw: string) => any>;
   /** Custom serializers converting typed route params into URL string segments. */
   stringify?: Record<string, (value: any) => string>;
+  /**
+   * Native only: the route has a React Navigation screen. Routes without `native: true`
+   * are handed to the native provider's `openWeb(url)` instead (WebView boundary).
+   * Ignored on web.
+   */
+  native?: boolean;
+  /**
+   * Where `goBack()` goes when there is no history to go back to (e.g. after a deep link).
+   * Used when the provider has no `onBackAtRoot` handler.
+   */
+  parent?: NavigationTarget<any> | ((route: UnifiedRoute<any>) => NavigationTarget<any>);
 }
 
 export interface RouteDefinition<TName extends string = string>
@@ -44,18 +55,6 @@ export interface RouteDefinition<TName extends string = string>
 }
 
 export type RouteConfigMap = Record<string, RouteConfigInput>;
-
-/**
- * Optional map of route names to their parameter shapes for compile-time typed routing.
- * Example:
- * ```ts
- * type AppParams = {
- *   Home: undefined;
- *   UserProfile: { id: number };
- * };
- * ```
- */
-export type ParamListBase = Record<string, RouteParams | undefined>;
 
 export interface NavigationOptions {
   /** Query string parameters appended to the URL (web) or stored in route metadata (native). */
@@ -129,6 +128,20 @@ export interface SetQueryOptions {
   merge?: boolean;
 }
 
+/** Mirrors history v4 `Action`. */
+export type HistoryAction = 'PUSH' | 'REPLACE' | 'POP';
+
+/** Called after every location change (web: `history.listen`; native: container state change). */
+export type NavigationListener = (route: UnifiedRoute, action: HistoryAction) => void;
+
+export interface BackAtRootContext {
+  route: UnifiedRoute<any>;
+  router: RouterController<any>;
+}
+
+/** Confirmation used for string guard prompts. Web default: `window.confirm`; native default: `Alert.alert`. */
+export type GetUserConfirmation = (message: string, callback: (allow: boolean) => void) => void;
+
 export type NavigationGuardAction =
   | 'navigate'
   | 'push'
@@ -156,25 +169,34 @@ export type NavigationGuardCallback = (
 ) => boolean | string | void;
 
 export interface RouterController<TName extends string = string> {
-  /** Navigate to a route or URL (web: history.push, native: navigation.navigate). */
+  /**
+   * Go to a route or URL. Adds a history entry (web: `history.push`, native stack: `push`),
+   * except when the target is the current location, which is updated in place.
+   */
   navigate: (
     target: NavigationTarget<TName>,
     params?: RouteParams,
     options?: NavigationOptions,
   ) => void;
-  /** Push a new route entry onto the stack even if already on the same route. */
+  /** Always add a new history entry, even for the current location. */
   push: (
     target: NavigationTarget<TName>,
     params?: RouteParams,
     options?: NavigationOptions,
   ) => void;
-  /** Replace the current route entry without adding to back history. */
+  /**
+   * Replace the current entry. Targeting the current route name updates it in place
+   * (the screen stays mounted on both platforms).
+   */
   replace: (
     target: NavigationTarget<TName>,
     params?: RouteParams,
     options?: NavigationOptions,
   ) => void;
-  /** Go back one step in navigation history if possible. */
+  /**
+   * Go back one entry. With no history (e.g. opened from a deep link) it calls the
+   * provider's `onBackAtRoot`, or replaces with the route's `parent` when there is none.
+   */
   goBack: () => void;
   /** Returns true when there is a previous route to go back to. */
   canGoBack: () => boolean;
@@ -242,6 +264,8 @@ export interface RouteRegistry<TName extends string = string> {
     options?: Omit<NavigationOptions, 'state'>,
   ) => string;
   matchUrl: (url: string) => RouteMatchResult<TName> | null;
+  /** Resolve a route's `parent` (see `RouteConfigInput.parent`), or null. */
+  resolveParent: (route: UnifiedRoute<TName>) => ResolvedNavigationIntent<TName> | null;
   resolveTarget: (
     target: NavigationTarget<TName>,
     params?: RouteParams,
@@ -264,6 +288,10 @@ export interface RouterAdapter<TName extends string = string> {
     when: boolean,
     messageOrHandler?: string | NavigationGuardCallback,
   ) => void;
+  /** Subscribe to location changes. Works outside screens. */
+  useListen: () => (listener: NavigationListener) => () => void;
+  /** Action of the most recent location change. */
+  useLastAction: () => HistoryAction;
 }
 
 export interface CommonLinkProps<TName extends string = string> {
@@ -284,6 +312,12 @@ export interface CommonLinkProps<TName extends string = string> {
   onClick?: (event?: any) => void;
   target?: string;
   rel?: string;
+  /** Web: class added while the link's target is active (like React Router's `NavLink`). */
+  activeClassName?: string;
+  /** Style merged in while the link's target is active. */
+  activeStyle?: any;
+  /** Active only on an exact pathname match (defaults to false: prefix match, like `NavLink`). */
+  exact?: boolean;
 }
 
 export interface RedirectProps<TName extends string = string> {

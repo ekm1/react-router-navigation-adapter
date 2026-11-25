@@ -7,6 +7,8 @@ export {
   useIsFocused,
   useFocusEffect,
   useNavigationGuard,
+  useNavigationListener,
+  useIsActive,
   useRouteRegistry,
   createTypedRouterHooks,
 } from './hooks';
@@ -35,4 +37,7 @@ export {
   parseRelativeUrl,
   stringifyQueryParams,
 } from './pathUtils';
+// React Router v5 API for drop-in call sites; on native the same names come from the compat layer.
+export { useHistory, useLocation, withRouter } from 'react-router-dom';
+export type { RouteComponentProps } from 'react-router-dom';
 export type * from './types';

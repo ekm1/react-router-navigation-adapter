@@ -7,6 +7,8 @@ export {
   useIsFocused,
   useFocusEffect,
   useNavigationGuard,
+  useNavigationListener,
+  useIsActive,
   useRouteRegistry,
   createTypedRouterHooks,
 } from './hooks';
@@ -38,4 +40,13 @@ export {
   parseRelativeUrl,
   stringifyQueryParams,
 } from './pathUtils';
+// React Router v5 compatible API (useHistory/useLocation/withRouter) built on the common interface.
+export { useHistory, useLocation, withRouter } from './compat.native';
+export type {
+  CompatHistory,
+  CompatLocation,
+  CompatMatch,
+  RouteComponentProps,
+} from './compat.native';
+export { createLinking, getStateFromUrl, unpackNativeRoute } from './adapters/native';
 export type * from './types';

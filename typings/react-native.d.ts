@@ -9,9 +9,25 @@ declare module 'react-native' {
     testID?: string;
     accessibilityRole?: string;
     accessibilityLabel?: string;
+    accessibilityState?: { selected?: boolean; disabled?: boolean };
   }
 
   export const Pressable: ComponentType<PressableProps>;
+  export const View: ComponentType<{ children?: ReactNode; style?: any; testID?: string }>;
+  export const Text: ComponentType<{ children?: ReactNode; style?: any; testID?: string }>;
+  export interface AlertButton {
+    text?: string;
+    onPress?: () => void;
+    style?: 'default' | 'cancel' | 'destructive';
+  }
+  export const Alert: {
+    alert: (
+      title: string,
+      message?: string,
+      buttons?: AlertButton[],
+      options?: { cancelable?: boolean; onDismiss?: () => void },
+    ) => void;
+  };
   export const Platform: {
     OS: 'ios' | 'android' | 'web' | 'windows' | 'macos';
     select: <T>(specifics: Record<string, T>) => T;

@@ -12,7 +12,7 @@ export interface NativeRouterViewProps<TName extends string = string> {
   navigator: NativeNavigatorLike;
   /** Optional explicit route registry (defaults to the registry from `<RouterProvider>`). */
   routes?: RouteRegistry<TName>;
-  /** Initial screen name for the navigator (defaults to the first route with a component). */
+  /** Initial screen name for the navigator (defaults to the first native route). */
   initialRouteName?: TName;
   /** Default screen options passed to `<Navigator screenOptions={...}>`. */
   screenOptions?: Record<string, unknown> | ((props: any) => Record<string, unknown>);
@@ -37,7 +37,8 @@ export function RouterView<TName extends string = string>({
   const registry = explicitRoutes ?? contextRoutes;
   const { Navigator, Screen } = navigator;
 
-  const screenRoutes = registry.routes.filter((r) => Boolean(r.component));
+  // Only `native: true` routes get screens; everything else goes through `openWeb`.
+  const screenRoutes = registry.routes.filter((r) => r.native && r.component);
   const resolvedInitial = initialRouteName ?? screenRoutes[0]?.name;
 
   return (
