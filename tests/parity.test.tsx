@@ -3,7 +3,6 @@ import { describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import {
-  Redirect,
   defineRoutes,
   useFocusEffect,
   useIsFocused,
@@ -16,6 +15,8 @@ import {
 import { WebRouterProvider } from '../src/adapters/web';
 import { NativeRouterProvider } from '../src/adapters/native';
 import { Link as WebLink } from '../src/components/Link.web';
+import { Redirect as WebRedirect } from '../src/components/Redirect.web';
+import { Redirect as NativeRedirect } from '../src/components/Redirect';
 import { Link as NativeLink } from '../src/components/Link.native';
 import { RouterView as WebRouterView } from '../src/components/RouterView.web';
 import { RouterView as NativeRouterView } from '../src/components/RouterView.native';
@@ -232,6 +233,7 @@ function createSharedApp(
   }
 
   function LegacyProfileScreen() {
+    const Redirect = useRouter().platform === 'web' ? WebRedirect : NativeRedirect;
     return <Redirect to="UserProfile" params={{ id: 88 }} query={{ from: 'legacy' }} />;
   }
 

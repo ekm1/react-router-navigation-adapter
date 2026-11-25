@@ -41,12 +41,23 @@ export {
   stringifyQueryParams,
 } from './pathUtils';
 // React Router v5 compatible API (useHistory/useLocation/withRouter) built on the common interface.
-export { useHistory, useLocation, withRouter } from './compat.native';
+export {
+  generatePath,
+  matchPath,
+  useHistory,
+  useLocation,
+  useRouteMatch,
+  withRouter,
+} from './compat.native';
 export type {
   CompatHistory,
   CompatLocation,
   CompatMatch,
+  MatchPathOptions,
   RouteComponentProps,
+  WithRouterProps,
 } from './compat.native';
+export { Prompt } from './components/Prompt';
+export type { PromptProps } from './components/Prompt';
 export { createLinking, getStateFromUrl, unpackNativeRoute } from './adapters/native';
 export type * from './types';

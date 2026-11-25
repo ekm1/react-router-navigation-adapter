@@ -118,7 +118,11 @@ export function parseRelativeUrl(url: string): ParsedUrl {
   if (/^[a-zA-Z][a-zA-Z\d+\-.]*:\/\//.test(working)) {
     try {
       const parsed = new URL(working);
-      working = `${parsed.pathname}${parsed.search}${parsed.hash}`;
+      // `myapp://myBets/42` parses as host "myBets" + pathname "/42": for custom schemes the
+      // host is the first path segment. Web URLs (http/https) keep their real host.
+      const isWeb = parsed.protocol === 'http:' || parsed.protocol === 'https:';
+      const pathname = !isWeb && parsed.host ? `/${parsed.host}${parsed.pathname === '/' ? '' : parsed.pathname}` : parsed.pathname;
+      working = `${pathname}${parsed.search}${parsed.hash}`;
     } catch {
       // Fall through and treat as relative
     }

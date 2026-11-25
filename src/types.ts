@@ -41,6 +41,13 @@ export interface RouteConfigInput {
    */
   native?: boolean;
   /**
+   * Native only: route names of the navigators this screen is nested in, from the outer
+   * `<RouterView>` navigator inwards (e.g. `['Tabs', 'MyBetsTab']`). Used for deep links into
+   * nested navigators and for navigating into tabs/stacks that are not mounted yet.
+   * Mounted navigators are found without it.
+   */
+  nestedIn?: string[];
+  /**
    * Where `goBack()` goes when there is no history to go back to (e.g. after a deep link).
    * Used when the provider has no `onBackAtRoot` handler.
    */
@@ -153,6 +160,8 @@ export type NavigationGuardAction =
 
 export interface NavigationGuardContext {
   action: NavigationGuardAction;
+  /** URL being navigated to, when known (not for back/pop). */
+  nextPath?: string;
   /** Call to allow the blocked navigation to continue asynchronously (e.g. after custom modal confirm). */
   proceed: () => void;
   /** Call to prevent the navigation from occurring. */
@@ -198,6 +207,13 @@ export interface RouterController<TName extends string = string> {
    * provider's `onBackAtRoot`, or replaces with the route's `parent` when there is none.
    */
   goBack: () => void;
+  /**
+   * Go back `-delta` entries in one step (native: `StackActions.pop(n)`). Going back further
+   * than the history allows behaves like `goBack()` at the root. Positive deltas do nothing.
+   */
+  go: (delta: number) => void;
+  /** Number of entries in the current history stack (web: SPA entries; native: the screen's stack). */
+  getLength: () => number;
   /** Returns true when there is a previous route to go back to. */
   canGoBack: () => boolean;
   /** Reset the navigation stack to the provided routes (defaults index to last route). */
@@ -238,18 +254,19 @@ export interface ResolvedNavigationIntent<TName extends string = string> {
   path: string;
 }
 
+export interface LinkingScreenConfig {
+  path?: string;
+  exact?: boolean;
+  parse?: Record<string, (value: string) => any>;
+  stringify?: Record<string, (value: any) => string>;
+  /** Screens of a nested navigator (see `RouteConfigInput.nestedIn`). */
+  screens?: Record<string, LinkingScreenConfig>;
+}
+
 export interface ReactNavigationLinkingConfig {
   prefixes: string[];
   config: {
-    screens: Record<
-      string,
-      {
-        path: string;
-        exact?: boolean;
-        parse?: Record<string, (value: string) => any>;
-        stringify?: Record<string, (value: any) => string>;
-      }
-    >;
+    screens: Record<string, LinkingScreenConfig>;
   };
 }
 

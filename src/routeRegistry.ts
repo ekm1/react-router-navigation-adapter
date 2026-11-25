@@ -184,14 +184,14 @@ export function defineRoutes<TMap extends RouteConfigMap>(
     query: QueryParams,
     hash: string,
     state: unknown,
+    /** Keep this pathname (non-exact routes matched by a longer URL). */
+    keepPathname?: string,
   ): ResolvedNavigationIntent<TName> => {
     const { pathParams, extraQuery } = splitParams(entry, params);
     const mergedQuery = { ...extraQuery, ...query };
-    const pathname = generatePathFromPattern(
-      entry.definition.path,
-      pathParams,
-      entry.definition.stringify,
-    );
+    const pathname =
+      keepPathname ??
+      generatePathFromPattern(entry.definition.path, pathParams, entry.definition.stringify);
     return {
       name: entry.definition.name,
       params: pathParams,
@@ -249,12 +249,16 @@ export function defineRoutes<TMap extends RouteConfigMap>(
       const matched = matchUrl(fullUrl);
 
       if (matched) {
+        const entry = byName.get(matched.name)!;
+        // `{ path: '/bets', exact: false }` matching '/bets/123' must not truncate to '/bets'.
+        const overridesPath = Object.keys(params ?? {}).some((k) => entry.paramNames.includes(k));
         return fromEntry(
-          byName.get(matched.name)!,
+          entry,
           { ...matched.params, ...(params ?? {}) },
           matched.query,
           matched.hash,
           options?.state,
+          entry.definition.exact === false && !overridesPath ? matched.pathname : undefined,
         );
       }
 
@@ -287,7 +291,13 @@ export function defineRoutes<TMap extends RouteConfigMap>(
     for (const entry of entries) {
       const { definition } = entry;
       if (!definition.native) continue;
-      screens[definition.name] = {
+      // Nested navigators: screens: { Tabs: { screens: { MyBetsTab: { screens: { Ticket } } } } }
+      let level = screens;
+      for (const navigatorRoute of definition.nestedIn ?? []) {
+        const parent = (level[navigatorRoute] ??= { screens: {} });
+        level = parent.screens ??= {};
+      }
+      level[definition.name] = {
         path: toReactNavigationPath(definition.path),
         ...(definition.exact !== undefined ? { exact: definition.exact } : {}),
         ...(definition.parse ? { parse: definition.parse } : {}),

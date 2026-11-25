@@ -10,6 +10,9 @@ declare module 'react-native' {
     accessibilityRole?: string;
     accessibilityLabel?: string;
     accessibilityState?: { selected?: boolean; disabled?: boolean };
+    hitSlop?: number | { top?: number; bottom?: number; left?: number; right?: number };
+    onLongPress?: (event?: any) => void;
+    ref?: any;
   }
 
   export const Pressable: ComponentType<PressableProps>;

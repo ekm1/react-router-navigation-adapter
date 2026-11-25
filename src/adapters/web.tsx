@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useMemo, useRef } from 'react';
+import React, { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { __RouterContext } from 'react-router';
 import {
   BrowserRouter,
@@ -16,7 +16,7 @@ import {
   parseQueryString,
   stringifyQueryParams,
 } from '../pathUtils';
-import { backAtRoot, mergeQuery, runGuard } from '../shared';
+import { backAtRoot, mergeQuery, promptToGuard, resolveParamsUpdate, runGuard } from '../shared';
 import type {
   BackAtRootContext,
   GetUserConfirmation,
@@ -59,9 +59,12 @@ type GuardHandlerRef = React.MutableRefObject<string | NavigationGuardCallback |
 
 interface WebInternalState {
   canGoBack: () => boolean;
+  /** Entries that `goBack()` can still reach. */
+  depth: () => number;
+  length: () => number;
   resetStack: (depth: number) => void;
   addGuard: (handler: GuardHandlerRef) => () => void;
-  runGuards: (action: NavigationGuardAction, proceed: () => void) => boolean;
+  runGuards: (action: NavigationGuardAction, proceed: () => void, nextPath?: string) => boolean;
   bypassRef: React.MutableRefObject<boolean>;
   onBackAtRoot?: (ctx: BackAtRootContext) => void;
 }
@@ -73,6 +76,10 @@ const GUARD_ACTIONS: Record<Action, NavigationGuardAction> = {
   REPLACE: 'replace',
   POP: 'goBack',
 };
+
+const INITIAL_KEY = '__initial__';
+/** History entry key; the browser's initial entry has none. */
+const keyOf = (location: Location) => location.key ?? INITIAL_KEY;
 
 function toUnifiedRoute<TName extends string>(
   location: Location,
@@ -141,9 +148,18 @@ function createWebController<TName extends string>(
     replace: (target, params, options) =>
       history.replace(toLocation(registry.resolveTarget(target, params, options))),
     canGoBack: () => internal.canGoBack(),
+    getLength: () => internal.length(),
+    go: (delta) => {
+      if (delta >= 0) return;
+      if (-delta <= internal.depth()) history.go(delta);
+      else controller.goBack();
+    },
     goBack: () => {
       if (internal.canGoBack()) history.goBack();
-      else backAtRoot(registry, route, controller, internal.onBackAtRoot);
+      else
+        backAtRoot(registry, route, controller, internal.onBackAtRoot, (proceed) =>
+          internal.runGuards('goBack', proceed),
+        );
     },
     reset: (targets, index) => {
       if (!targets || targets.length === 0) return;
@@ -160,16 +176,11 @@ function createWebController<TName extends string>(
           );
           internal.resetStack(active.length - 1);
         });
-      if (internal.runGuards('reset', run)) run();
+      if (internal.runGuards('reset', run, active[active.length - 1]?.path)) run();
     },
     setParams: (partial) => {
-      if (!route.name) return;
-      const resolved = registry.resolveTarget(
-        route.name,
-        { ...route.params, ...partial },
-        { query: route.query, hash: route.hash, state: route.state },
-      );
-      history.replace(toLocation(resolved));
+      const resolved = resolveParamsUpdate(registry, route, partial);
+      if (resolved) history.replace(toLocation(resolved));
     },
     setQuery: (input, options) => {
       const next = { ...route, query: mergeQuery(route.query, input, options?.merge ?? true) };
@@ -196,7 +207,8 @@ function WebRouterBridge<TName extends string>({
   const isMemory = typeof memory.index === 'number';
 
   // Track SPA history depth so `canGoBack()` is reliable (browser history exposes no index).
-  const stackRef = useRef<string[]>([history.location.key ?? '__initial__']);
+  // Browser history gives the initial entry no key; history v4 tracks it as `undefined`.
+  const stackRef = useRef<string[]>([keyOf(history.location)]);
   const indexRef = useRef<number>(isMemory ? memory.index! : 0);
   // Lowest index `goBack()` may reach after a `reset()` (history entries cannot be removed).
   const floorRef = useRef(0);
@@ -218,7 +230,10 @@ function WebRouterBridge<TName extends string>({
           floorRef.current = Math.min(floorRef.current, indexRef.current);
           return;
         }
-        const key = location.key ?? `${location.pathname}${location.search}${location.hash}`;
+        const key = keyOf(location);
+        // After a blocked POP, history v4 reverts the browser and then notifies listeners again
+        // with the unchanged location and the previous action: not a new entry.
+        if (key === stackRef.current[indexRef.current]) return;
         if (action === 'PUSH') {
           stackRef.current = [...stackRef.current.slice(0, indexRef.current + 1), key];
           indexRef.current = stackRef.current.length - 1;
@@ -232,12 +247,31 @@ function WebRouterBridge<TName extends string>({
     [history, isMemory, memory],
   );
 
-  useEffect(() => () => unblockRef.current?.(), []);
+  // history v4 allows one prompt at a time, so any other `history.block` caller (React Router's
+  // own <Prompt>, `props.history.block`) would silently replace the adapter's guard. While mounted,
+  // route `history.block` on this history instance into the central guard list instead.
+  // Patched during render so children's mount effects (e.g. <Prompt>) already see it.
+  const addGuardRef = useRef<(handler: GuardHandlerRef) => () => void>(() => () => {});
+  const [originalBlock] = useState(() => {
+    const original = history.block;
+    (history as any).block = (prompt: any = false) =>
+      addGuardRef.current({
+        current: promptToGuard(typeof prompt === 'boolean' ? () => prompt : prompt),
+      });
+    return original;
+  });
+  useEffect(
+    () => () => {
+      unblockRef.current?.();
+      (history as any).block = originalBlock;
+    },
+    [history, originalBlock],
+  );
 
   const internal = useMemo<WebInternalState>(() => {
-    const runGuards = (action: NavigationGuardAction, proceed: () => void) => {
+    const runGuards = (action: NavigationGuardAction, proceed: () => void, nextPath?: string) => {
       for (const handler of Array.from(guardsRef.current).reverse()) {
-        if (!runGuard(handler.current, action, proceed, confirmRef.current)) return false;
+        if (!runGuard(handler.current, action, proceed, confirmRef.current, nextPath)) return false;
       }
       return true;
     };
@@ -245,8 +279,8 @@ function WebRouterBridge<TName extends string>({
     // Re-run a blocked transition once its guard allows it.
     const replay = (location: Location, action: Action) => {
       if (action === 'POP') {
-        const keys = isMemory ? memory.entries!.map((l) => l.key) : stackRef.current;
-        const target = location.key ? keys.indexOf(location.key) : -1;
+        const keys = isMemory ? memory.entries!.map(keyOf) : stackRef.current;
+        const target = keys.indexOf(keyOf(location));
         bypassPopRef.current = true;
         history.go(target !== -1 ? target - indexRef.current : -1);
         return;
@@ -268,7 +302,8 @@ function WebRouterBridge<TName extends string>({
       }
       // Query/hash-only changes (setQuery/setParams on the same path) do not leave the screen.
       if (location.pathname === history.location.pathname) return undefined;
-      return runGuards(GUARD_ACTIONS[action], () => replay(location, action)) ? undefined : false;
+      const nextPath = `${location.pathname}${location.search}${location.hash}`;
+      return runGuards(GUARD_ACTIONS[action], () => replay(location, action), nextPath) ? undefined : false;
     };
 
     const onBeforeUnload = (event: BeforeUnloadEvent) => {
@@ -279,7 +314,7 @@ function WebRouterBridge<TName extends string>({
     const sync = () => {
       const active = guardsRef.current.size > 0;
       if (active && !unblockRef.current) {
-        const unblock = history.block(blocker as any);
+        const unblock = originalBlock.call(history, blocker as any);
         if (typeof window !== 'undefined' && !isMemory) {
           window.addEventListener('beforeunload', onBeforeUnload);
         }
@@ -295,13 +330,15 @@ function WebRouterBridge<TName extends string>({
 
     return {
       canGoBack: () => (isMemory ? memory.index! : indexRef.current) > floorRef.current,
+      depth: () => (isMemory ? memory.index! : indexRef.current) - floorRef.current,
+      length: () => (isMemory ? memory.index! : indexRef.current) - floorRef.current + 1,
       resetStack: (depth) => {
         if (isMemory) {
           indexRef.current = memory.index!;
           floorRef.current = Math.max(0, memory.index! - depth);
         } else {
           stackRef.current = Array.from({ length: depth + 1 }, (_, i) =>
-            i === depth ? history.location.key ?? '__reset__' : `__reset_${i}__`,
+            i === depth ? keyOf(history.location) : `__reset_${i}__`,
           );
           indexRef.current = depth;
           floorRef.current = 0;
@@ -321,7 +358,8 @@ function WebRouterBridge<TName extends string>({
         return backAtRootRef.current;
       },
     };
-  }, [history, isMemory, memory]);
+  }, [history, isMemory, memory, originalBlock]);
+  addGuardRef.current = internal.addGuard;
 
   const adapter = useMemo<RouterAdapter<TName>>(
     () => ({
@@ -416,11 +454,13 @@ export function WebRouterProvider<TName extends string = string>({
   if (history) return <Router history={history}>{bridge}</Router>;
   if (routerType === 'memory') {
     return (
-      <MemoryRouter initialEntries={initialEntries ?? ['/']} initialIndex={initialIndex}>
+      <MemoryRouter initialEntries={initialEntries ?? ['/']} initialIndex={initialIndex} getUserConfirmation={getUserConfirmation}>
         {bridge}
       </MemoryRouter>
     );
   }
-  if (routerType === 'hash') return <HashRouter basename={basename}>{bridge}</HashRouter>;
-  return <BrowserRouter basename={basename}>{bridge}</BrowserRouter>;
+  if (routerType === 'hash') {
+    return <HashRouter basename={basename} getUserConfirmation={getUserConfirmation}>{bridge}</HashRouter>;
+  }
+  return <BrowserRouter basename={basename} getUserConfirmation={getUserConfirmation}>{bridge}</BrowserRouter>;
 }
