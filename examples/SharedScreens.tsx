@@ -1,72 +1,73 @@
-import { useState } from 'react';
-import { Link } from '../src/index';
-import {
-  useNavigationGuard,
-  useParams,
-  useQuery,
-  useRoute,
-  useRouter,
-} from './routes';
+import { Pressable, Text, View } from 'react-native';
+import { Link, withRouter, type RouteComponentProps } from '../src/index';
+import { useNavigationGuard, useParams, useQuery, useRoute, useRouter } from './hooks';
 
 /**
- * Shared screens written once against the common routing interface.
- * On Web this runs on React Router v5; on Native this runs on React Navigation.
+ * Screens written once with React Native primitives (react-native-web on web)
+ * against the common routing interface.
  */
-export function HomeScreen() {
+export function MyBetsScreen() {
   const router = useRouter();
-
   return (
-    <div>
-      <h1>Home ({router.platform})</h1>
-      <button
-        onClick={() =>
-          router.navigate('UserProfile', { id: 42 }, { query: { tab: 'posts' } })
-        }
-      >
-        Open User #42
-      </button>
-      <Link to="Settings" params={{ section: 'billing' }}>
-        Billing Settings
+    <View>
+      <Text>My Bets ({router.platform})</Text>
+      <Pressable onPress={() => router.navigate('Ticket', { id: 42 }, { query: { type: 'million' } })}>
+        <Text>Open ticket 42</Text>
+      </Pressable>
+      <Link to="Settled" activeStyle={{ fontWeight: 'bold' }}>
+        <Text>Settled</Text>
       </Link>
-    </div>
+      {/* Not a native route: opens the WebView on native via `openWeb`. */}
+      <Link to="Promotions">
+        <Text>Promotions</Text>
+      </Link>
+    </View>
   );
 }
 
-export function UserProfileScreen() {
+export function SettledScreen() {
+  return (
+    <View>
+      <Text>Settled bets</Text>
+    </View>
+  );
+}
+
+export function TicketScreen() {
   const router = useRouter();
   const route = useRoute();
-  const { id } = useParams<{ id: number }>();
-  const { tab = 'overview' } = useQuery<{ tab?: string }>();
+  const { id } = useParams<{ id: string }>();
+  const { type = 'single' } = useQuery<{ type?: string }>();
+  useNavigationGuard(false, 'Discard your changes?');
 
   return (
-    <div>
-      <h1>User #{id}</h1>
-      <p>Active URL: {route.path}</p>
-      <p>Tab: {tab}</p>
-      <button onClick={() => router.setQuery({ tab: 'activity' })}>
-        Switch Tab
-      </button>
-      {router.canGoBack() && (
-        <button onClick={() => router.goBack()}>Back</button>
-      )}
-    </div>
+    <View>
+      <Text>Ticket #{id} ({type})</Text>
+      <Text>URL: {route.path}</Text>
+      {/* Adds a history entry on both platforms; back returns here. */}
+      <Pressable onPress={() => router.navigate('Ticket', { id: String(Number(id) + 1) })}>
+        <Text>Next ticket</Text>
+      </Pressable>
+      {/* At the root (opened from a deep link) this calls onBackAtRoot, or goes to `parent`. */}
+      <Pressable onPress={() => router.goBack()}>
+        <Text>Back</Text>
+      </Pressable>
+      <TicketFilters />
+    </View>
   );
 }
 
-export function SettingsScreen() {
-  const router = useRouter();
-  const { section = 'general' } = useParams<{ section?: string }>();
-  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+/** Existing React Router v5 style code keeps working on both platforms. */
+const TicketFilters = withRouter(({ history, location }: RouteComponentProps) => (
+  <Pressable onPress={() => history.replace({ search: '?type=million' })}>
+    <Text>Filter: {location.search || 'none'}</Text>
+  </Pressable>
+));
 
-  useNavigationGuard(hasUnsavedChanges, 'Discard unsaved settings?');
-
+export function PromotionsPage() {
   return (
-    <div>
-      <h1>Settings: {section}</h1>
-      <button onClick={() => setHasUnsavedChanges((v) => !v)}>
-        Toggle Dirty ({String(hasUnsavedChanges)})
-      </button>
-      <button onClick={() => router.goBack()}>Back</button>
-    </div>
+    <View>
+      <Text>Promotions (web only)</Text>
+    </View>
   );
 }

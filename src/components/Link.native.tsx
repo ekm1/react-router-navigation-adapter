@@ -1,6 +1,6 @@
 import { useCallback } from 'react';
 import { Pressable } from 'react-native';
-import { useRouter } from '../hooks';
+import { useIsActive, useRouter } from '../hooks';
 import type { CommonLinkProps } from '../types';
 
 /**
@@ -22,8 +22,17 @@ export function Link<TName extends string = string>({
   disabled,
   onPress,
   onClick,
+  activeStyle,
+  exact,
 }: CommonLinkProps<TName>) {
   const router = useRouter<TName>();
+  const isActive = useIsActive(to, params, { exact });
+  const resolvedStyle =
+    isActive && activeStyle
+      ? typeof style === 'function'
+        ? (pressable: { pressed: boolean }) => [style(pressable), activeStyle]
+        : [style, activeStyle]
+      : style;
 
   const handlePress = useCallback(
     (event: any) => {
@@ -50,7 +59,8 @@ export function Link<TName extends string = string>({
       accessibilityRole="link"
       accessibilityLabel={accessibilityLabel}
       testID={testID}
-      style={style}
+      style={resolvedStyle}
+      accessibilityState={isActive ? { selected: true } : undefined}
       disabled={disabled}
       onPress={handlePress}
     >

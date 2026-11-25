@@ -1,28 +1,22 @@
-import { createTypedRouterHooks, defineRoutes } from '../src/index';
+import { defineRoutes, type RouteRegistry } from '../src/index';
+import { MyBetsScreen, PromotionsPage, SettledScreen, TicketScreen } from './SharedScreens';
 
+/**
+ * Defined once for both platforms.
+ * - `native: true` routes are React Navigation screens on native; everything else opens in the WebView.
+ * - Matching is first-match in declaration order: static routes before dynamic ones.
+ */
 export const routes = defineRoutes({
-  Home: {
-    path: '/',
-    options: { title: 'Home' },
+  MyBets: { path: '/myBets', component: MyBetsScreen, native: true, options: { title: 'My Bets' } },
+  Settled: { path: '/myBets/settled', component: SettledScreen, native: true },
+  Ticket: {
+    path: '/myBets/:id',
+    component: TicketScreen,
+    native: true,
+    parent: 'MyBets', // goBack() target after a deep link (when no onBackAtRoot handles it)
+    options: { title: 'Ticket' },
   },
-  UserProfile: {
-    path: '/users/:id',
-    parse: { id: Number },
-    stringify: { id: (id: number) => String(id) },
-    options: { title: 'Profile' },
-  },
-  Settings: {
-    path: '/settings/:section?',
-    options: { title: 'Settings' },
-  },
+  Promotions: { path: '/promotions', component: PromotionsPage }, // web only
 });
 
-export const {
-  useRouter,
-  useRoute,
-  useParams,
-  useQuery,
-  useIsFocused,
-  useFocusEffect,
-  useNavigationGuard,
-} = createTypedRouterHooks(routes);
+export type RouteName = typeof routes extends RouteRegistry<infer N> ? N : never;

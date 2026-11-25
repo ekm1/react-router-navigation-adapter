@@ -13,11 +13,34 @@ export const Linking = {
   }),
 };
 
+const backHandlers: Array<() => boolean | null | undefined> = [];
+
 export const BackHandler = {
-  addEventListener: (_eventName: string, _handler: () => boolean) => ({
-    remove: () => {},
-  }),
+  addEventListener: (_eventName: string, handler: () => boolean | null | undefined) => {
+    backHandlers.push(handler);
+    return {
+      remove: () => {
+        const idx = backHandlers.indexOf(handler);
+        if (idx !== -1) backHandlers.splice(idx, 1);
+      },
+    };
+  },
   removeEventListener: () => {},
+  /** Test helper: simulate the Android back button (last registered handler first). */
+  pressBack: (): boolean => {
+    for (const handler of [...backHandlers].reverse()) {
+      if (handler()) return true;
+    }
+    return false;
+  },
+};
+
+/** Tests set `Alert.respond` to pick the button pressed ('Leave' or 'Cancel'). */
+export const Alert = {
+  respond: 'Cancel' as string,
+  alert: (_title: string, _message?: string, buttons: Array<{ text?: string; onPress?: () => void }> = []) => {
+    buttons.find((b) => b.text === Alert.respond)?.onPress?.();
+  },
 };
 
 export const I18nManager = {
@@ -40,8 +63,10 @@ export function Pressable({
   testID,
   accessibilityRole,
   accessibilityLabel,
+  accessibilityState,
   style,
 }: {
+  accessibilityState?: { selected?: boolean };
   children?: React.ReactNode | ((state: { pressed: boolean }) => React.ReactNode);
   onPress?: (event?: any) => void;
   disabled?: boolean;
@@ -60,9 +85,14 @@ export function Pressable({
       role: accessibilityRole ?? 'button',
       'aria-label': accessibilityLabel,
       'aria-disabled': disabled || undefined,
+      'aria-selected': accessibilityState?.selected || undefined,
       'data-testid': testID,
       disabled: Boolean(disabled),
-      style: typeof style === 'object' ? style : undefined,
+      style: Array.isArray(style)
+        ? Object.assign({}, ...style.filter(Boolean))
+        : typeof style === 'object'
+          ? style
+          : undefined,
       onClick: (e: any) => {
         if (!disabled) {
           onPress?.(e);

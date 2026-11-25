@@ -1,6 +1,9 @@
+import { useEffect, useRef } from 'react';
 import { useUniversalRouterContext } from './context';
 import type {
   NavigationGuardCallback,
+  NavigationListener,
+  NavigationTarget,
   QueryParams,
   RouteParams,
   RouteRegistry,
@@ -83,10 +86,43 @@ export function useNavigationGuard(
 }
 
 /**
- * Helper to create route-name-typed hooks bound to a specific RouteRegistry.
+ * Calls `listener(route, action)` after every location change, like `history.listen`
+ * (e.g. for analytics). Works outside screens.
+ */
+export function useNavigationListener(listener: NavigationListener): void {
+  const { adapter } = useUniversalRouterContext();
+  const listen = adapter.useListen();
+  const listenerRef = useRef(listener);
+  listenerRef.current = listener;
+  useEffect(() => listen((route, action) => listenerRef.current(route, action)), [listen]);
+}
+
+/**
+ * Whether `to` is the current location, like React Router's `NavLink`: a pathname prefix
+ * match by default, or an exact one with `{ exact: true }`.
+ */
+export function useIsActive(
+  to: NavigationTarget,
+  params?: RouteParams,
+  options: { exact?: boolean } = {},
+): boolean {
+  const { registry } = useUniversalRouterContext();
+  const current = trimSlash(useRoute().pathname.toLowerCase());
+  const target = trimSlash(registry.resolveTarget(to, params).pathname.toLowerCase());
+  if (current === target) return true;
+  return !options.exact && current.startsWith(target === '/' ? '/' : `${target}/`);
+}
+
+function trimSlash(pathname: string): string {
+  return pathname.length > 1 ? pathname.replace(/\/+$/, '') : pathname;
+}
+
+/**
+ * Route-name-typed hooks. Pass the registry, or only its type to avoid an import cycle
+ * between the routes file and the screens: `createTypedRouterHooks<RouteName>()`.
  */
 export function createTypedRouterHooks<TName extends string>(
-  _registry: RouteRegistry<TName>,
+  _registry?: RouteRegistry<TName>,
 ) {
   return {
     useRouter: () => useRouter<TName>(),
@@ -97,6 +133,8 @@ export function createTypedRouterHooks<TName extends string>(
     useIsFocused,
     useFocusEffect,
     useNavigationGuard,
+    useNavigationListener,
+    useIsActive,
     useRouteRegistry: () => useRouteRegistry<TName>(),
   };
 }

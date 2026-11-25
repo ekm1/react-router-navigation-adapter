@@ -1,5 +1,7 @@
 import React, { useCallback } from 'react';
-import { useRouter } from '../hooks';
+import { useHistory } from 'react-router-dom';
+import { useIsActive, useRouteRegistry, useRouter } from '../hooks';
+import { normalizeHash, stringifyQueryParams } from '../pathUtils';
 import type { CommonLinkProps } from '../types';
 
 function isModifiedEvent(event: React.MouseEvent<HTMLAnchorElement>): boolean {
@@ -29,9 +31,20 @@ export function Link<TName extends string = string>({
   onClick,
   target,
   rel,
+  activeClassName,
+  activeStyle,
+  exact,
 }: CommonLinkProps<TName>) {
   const router = useRouter<TName>();
-  const href = router.buildUrl(to, params, { query, hash });
+  const history = useHistory();
+  const resolved = useRouteRegistry<TName>().resolveTarget(to, params, { query, hash });
+  // createHref applies the router's basename, so new-tab/copy-link URLs are correct.
+  const href = history.createHref({
+    pathname: resolved.pathname,
+    search: stringifyQueryParams(resolved.query),
+    hash: resolved.hash ? `#${normalizeHash(resolved.hash)}` : '',
+  });
+  const isActive = useIsActive(to, params, { exact });
 
   const handleClick = useCallback(
     (event: React.MouseEvent<HTMLAnchorElement>) => {
@@ -79,8 +92,9 @@ export function Link<TName extends string = string>({
   return (
     <a
       href={disabled ? undefined : href}
-      className={className}
-      style={style}
+      className={[className, isActive && activeClassName].filter(Boolean).join(' ') || undefined}
+      style={isActive && activeStyle ? { ...style, ...activeStyle } : style}
+      aria-current={isActive ? 'page' : undefined}
       data-testid={testID}
       aria-label={accessibilityLabel}
       aria-disabled={disabled || undefined}

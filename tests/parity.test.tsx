@@ -1,6 +1,6 @@
 import React, { useCallback, useState } from 'react';
 import { describe, expect, it, vi } from 'vitest';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import {
   Redirect,
@@ -278,16 +278,17 @@ function createSharedApp(
   }
 
   const routes = defineRoutes({
-    Home: { path: '/', component: HomeScreen },
+    Home: { path: '/', component: HomeScreen, native: true },
     UserProfile: {
       path: '/users/:id',
       parse: { id: Number },
       stringify: { id: (v: number) => String(v) },
       component: UserProfileScreen,
+      native: true,
     },
-    Settings: { path: '/settings/:section?', component: SettingsScreen },
-    LegacyProfile: { path: '/legacy', component: LegacyProfileScreen },
-    Editor: { path: '/editor', component: EditorScreen },
+    Settings: { path: '/settings/:section?', component: SettingsScreen, native: true },
+    LegacyProfile: { path: '/legacy', component: LegacyProfileScreen, native: true },
+    Editor: { path: '/editor', component: EditorScreen, native: true },
   });
 
   return { routes };
@@ -316,7 +317,8 @@ const drivers: PlatformDriver[] = [
       return render(
         <NativeRouterProvider
           routes={routes}
-          onUnmatchedUrl={options?.onUnmatchedUrl}
+          initialUrl={options?.initialUrl}
+          openWeb={options?.onUnmatchedUrl}
         >
           <NativeRouterView
             navigator={Stack}
@@ -569,32 +571,5 @@ describe('Platform-specific capabilities', () => {
     expect(screen.getByTestId('not-found')).toHaveTextContent(
       '404:/does-not-exist:null',
     );
-  });
-
-  it('Native: invokes onUnmatchedUrl when navigating to an unregistered raw URL', () => {
-    const onUnmatchedUrl = vi.fn();
-    let capturedRouter: ReturnType<typeof useRouter> | null = null;
-
-    function CaptureHome() {
-      capturedRouter = useRouter();
-      return <div data-testid="capture-home">Home</div>;
-    }
-
-    const routes = defineRoutes({
-      Home: { path: '/', component: CaptureHome },
-    });
-
-    const Stack = createTestStackNavigator();
-    render(
-      <NativeRouterProvider routes={routes} onUnmatchedUrl={onUnmatchedUrl}>
-        <NativeRouterView navigator={Stack} />
-      </NativeRouterProvider>,
-    );
-
-    act(() => {
-      capturedRouter!.navigate('/unregistered/page?x=1');
-    });
-
-    expect(onUnmatchedUrl).toHaveBeenCalledWith('/unregistered/page?x=1');
   });
 });

@@ -1,42 +1,31 @@
-import {
-  RouterProvider,
-  RouterView,
-  defineRoutes,
-  type NativeNavigatorLike,
-} from '../src/index.native';
-import {
-  HomeScreen,
-  SettingsScreen,
-  UserProfileScreen,
-} from './SharedScreens';
+import { createNativeStackNavigator } from '@react-navigation/native-stack';
+import { RouterProvider, RouterView } from '../src/index.native';
+import { routes } from './routes';
 
-const nativeRoutes = defineRoutes({
-  Home: { path: '/', component: HomeScreen, options: { title: 'Home' } },
-  UserProfile: {
-    path: '/users/:id',
-    parse: { id: Number },
-    stringify: { id: (id: number) => String(id) },
-    component: UserProfileScreen,
-    options: { title: 'Profile' },
-  },
-  Settings: {
-    path: '/settings/:section?',
-    component: SettingsScreen,
-    options: { title: 'Settings' },
-  },
-});
+const Stack = createNativeStackNavigator();
+
+interface HostProps {
+  /** Path the host opens the MFE at, e.g. "/myBets/42?type=million". */
+  initialUrl: string;
+  /** Host bridge: open a URL in the WebView. */
+  openWeb: (url: string) => void;
+  /** Host bridge: dismiss the MFE. */
+  closeHost: () => void;
+}
 
 /**
- * Native entrypoint: uses React Navigation (<NavigationContainer> + your Stack/Tab navigator).
- * Pass e.g. `const Stack = createNativeStackNavigator();` from `@react-navigation/native-stack`.
+ * Native: React Navigation 7 + native-stack.
  */
-export function NativeApp({ navigator }: { navigator: NativeNavigatorLike }) {
+export function NativeApp({ initialUrl, openWeb, closeHost }: HostProps) {
   return (
     <RouterProvider
-      routes={nativeRoutes}
-      linkingPrefixes={['myapp://', 'https://example.com']}
+      routes={routes}
+      initialUrl={initialUrl}
+      openWeb={openWeb}
+      onBackAtRoot={() => closeHost()}
+      linkingPrefixes={['myapp://']}
     >
-      <RouterView navigator={navigator} initialRouteName="Home" />
+      <RouterView navigator={Stack} />
     </RouterProvider>
   );
 }
