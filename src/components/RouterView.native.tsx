@@ -12,8 +12,15 @@ export interface NativeRouterViewProps<TName extends string = string> {
   navigator: NativeNavigatorLike;
   /** Optional explicit route registry (defaults to the registry from `<RouterProvider>`). */
   routes?: RouteRegistry<TName>;
-  /** Initial screen name for the navigator (defaults to the first native route). */
-  initialRouteName?: TName;
+  /** Initial screen name for the navigator (defaults to the first screen). */
+  initialRouteName?: TName | (string & {});
+  /**
+   * Nested navigators: render the routes whose `nestedIn` equals this path
+   * (e.g. `['Tabs', 'MyBetsTab']`). Defaults to `[]`, the routes without `nestedIn`.
+   */
+  scope?: string[];
+  /** Extra screens, e.g. the screens that render nested navigators: `<Stack.Screen name="Tabs" component={Tabs} />`. */
+  children?: React.ReactNode;
   /** Default screen options passed to `<Navigator screenOptions={...}>`. */
   screenOptions?: Record<string, unknown> | ((props: any) => Record<string, unknown>);
   /** Additional props forwarded directly to `<Navigator>`. */
@@ -32,13 +39,18 @@ export function RouterView<TName extends string = string>({
   initialRouteName,
   screenOptions,
   navigatorProps,
+  scope = [],
+  children,
 }: NativeRouterViewProps<TName>) {
   const contextRoutes = useRouteRegistry<TName>();
   const registry = explicitRoutes ?? contextRoutes;
   const { Navigator, Screen } = navigator;
 
   // Only `native: true` routes get screens; everything else goes through `openWeb`.
-  const screenRoutes = registry.routes.filter((r) => r.native && r.component);
+  const scopeKey = scope.join('/');
+  const screenRoutes = registry.routes.filter(
+    (r) => r.native && r.component && (r.nestedIn ?? []).join('/') === scopeKey,
+  );
   const resolvedInitial = initialRouteName ?? screenRoutes[0]?.name;
 
   return (
@@ -55,6 +67,7 @@ export function RouterView<TName extends string = string>({
           options={route.options}
         />
       ))}
+      {children}
     </Navigator>
   );
 }

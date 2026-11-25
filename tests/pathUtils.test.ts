@@ -105,4 +105,21 @@ describe('pathUtils', () => {
       );
     });
   });
+
+  describe('absolute URLs', () => {
+    it('keeps the first segment of custom-scheme URLs (host is part of the path)', () => {
+      expect(parseRelativeUrl('myapp://myBets/42?type=million#legs')).toMatchObject({
+        pathname: '/myBets/42',
+        query: { type: 'million' },
+        hash: 'legs',
+      });
+      expect(parseRelativeUrl('myapp://myBets').pathname).toBe('/myBets');
+      expect(parseRelativeUrl('myapp:///myBets/42').pathname).toBe('/myBets/42');
+    });
+
+    it('drops the host of web URLs', () => {
+      expect(parseRelativeUrl('https://example.com/myBets/42?x=1').pathname).toBe('/myBets/42');
+      expect(parseRelativeUrl('http://example.com').pathname).toBe('/');
+    });
+  });
 });

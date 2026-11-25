@@ -56,37 +56,44 @@ export function View(props: any) {
   return React.createElement('div', props, props.children);
 }
 
-export function Pressable({
-  children,
-  onPress,
-  disabled,
-  testID,
-  accessibilityRole,
-  accessibilityLabel,
-  accessibilityState,
-  style,
-}: {
-  accessibilityState?: { selected?: boolean };
-  children?: React.ReactNode | ((state: { pressed: boolean }) => React.ReactNode);
-  onPress?: (event?: any) => void;
-  disabled?: boolean;
-  testID?: string;
-  accessibilityRole?: string;
-  accessibilityLabel?: string;
-  style?: any;
-}) {
-  const renderedChildren =
-    typeof children === 'function' ? children({ pressed: false }) : children;
-
+export const Pressable = React.forwardRef(function Pressable(
+  {
+    children,
+    onPress,
+    onLongPress,
+    hitSlop,
+    disabled,
+    testID,
+    accessibilityRole,
+    accessibilityLabel,
+    accessibilityState,
+    style,
+  }: {
+    children?: React.ReactNode | ((state: { pressed: boolean }) => React.ReactNode);
+    onPress?: (event?: any) => void;
+    onLongPress?: (event?: any) => void;
+    hitSlop?: number;
+    disabled?: boolean;
+    testID?: string;
+    accessibilityRole?: string;
+    accessibilityLabel?: string;
+    accessibilityState?: { selected?: boolean };
+    style?: any;
+  },
+  ref: React.ForwardedRef<HTMLButtonElement>,
+) {
+  const renderedChildren = typeof children === 'function' ? children({ pressed: false }) : children;
   return React.createElement(
     'button',
     {
+      ref,
       type: 'button',
       role: accessibilityRole ?? 'button',
       'aria-label': accessibilityLabel,
       'aria-disabled': disabled || undefined,
       'aria-selected': accessibilityState?.selected || undefined,
       'data-testid': testID,
+      'data-hit-slop': hitSlop,
       disabled: Boolean(disabled),
       style: Array.isArray(style)
         ? Object.assign({}, ...style.filter(Boolean))
@@ -94,11 +101,11 @@ export function Pressable({
           ? style
           : undefined,
       onClick: (e: any) => {
-        if (!disabled) {
-          onPress?.(e);
-        }
+        if (!disabled) onPress?.(e);
       },
+      // Long press stands in as a context-menu event in tests.
+      onContextMenu: (e: any) => onLongPress?.(e),
     },
     renderedChildren,
   );
-}
+});

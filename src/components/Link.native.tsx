@@ -1,13 +1,13 @@
-import { useCallback } from 'react';
-import { Pressable } from 'react-native';
+import React, { forwardRef, useCallback } from 'react';
+import { Pressable, type PressableProps } from 'react-native';
 import { useIsActive, useRouter } from '../hooks';
 import type { CommonLinkProps } from '../types';
 
-/**
- * Native `<Link>` component rendering a React Native `<Pressable>` with
- * `accessibilityRole="link"` backed by React Navigation.
- */
-export function Link<TName extends string = string>({
+/** Common link props plus any other `<Pressable>` props (`hitSlop`, `onLongPress`, ...). */
+export type NativeLinkProps<TName extends string = string> = CommonLinkProps<TName> &
+  Omit<PressableProps, keyof CommonLinkProps>;
+
+function LinkImpl<TName extends string>({
   to,
   params,
   query,
@@ -24,7 +24,13 @@ export function Link<TName extends string = string>({
   onClick,
   activeStyle,
   exact,
-}: CommonLinkProps<TName>) {
+  // Web-only props, accepted so shared screens compile on both platforms.
+  className: _className,
+  activeClassName: _activeClassName,
+  target: _target,
+  rel: _rel,
+  ...rest
+}: NativeLinkProps<TName>, ref: React.ForwardedRef<any>) {
   const router = useRouter<TName>();
   const isActive = useIsActive(to, params, { exact });
   const resolvedStyle =
@@ -56,6 +62,8 @@ export function Link<TName extends string = string>({
 
   return (
     <Pressable
+      {...rest}
+      ref={ref}
       accessibilityRole="link"
       accessibilityLabel={accessibilityLabel}
       testID={testID}
@@ -68,3 +76,11 @@ export function Link<TName extends string = string>({
     </Pressable>
   );
 }
+
+/**
+ * Native `<Link>` rendering a React Native `<Pressable>` with `accessibilityRole="link"`,
+ * backed by React Navigation. Forwards its ref and other Pressable props.
+ */
+export const Link = forwardRef(LinkImpl) as <TName extends string = string>(
+  props: NativeLinkProps<TName> & { ref?: React.Ref<any> },
+) => React.ReactElement | null;
