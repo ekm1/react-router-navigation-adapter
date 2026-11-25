@@ -1,0 +1,85 @@
+{
+  "name": "react-router-navigation-adapter",
+  "version": "1.0.0",
+  "description": "A common routing interface compatibility layer bridging React Router v5 (web) and React Navigation (native).",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "react-native": "./src/index.native.ts",
+  "browser": "./dist/index.web.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "react-native": {
+        "types": "./dist/index.native.d.ts",
+        "default": "./dist/index.native.js"
+      },
+      "browser": {
+        "types": "./dist/index.web.d.ts",
+        "default": "./dist/index.web.js"
+      },
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./web": {
+      "types": "./dist/index.web.d.ts",
+      "default": "./dist/index.web.js"
+    },
+    "./native": {
+      "types": "./dist/index.native.d.ts",
+      "default": "./dist/index.native.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "peerDependencies": {
+    "@react-navigation/native": "^6.0.0 || ^7.0.0",
+    "react": ">=16.14.0 <20.0.0",
+    "react-native": ">=0.64.0",
+    "react-router": "^5.2.0",
+    "react-router-dom": "^5.2.0"
+  },
+  "peerDependenciesMeta": {
+    "react-router": {
+      "optional": true
+    },
+    "react-router-dom": {
+      "optional": true
+    },
+    "@react-navigation/native": {
+      "optional": true
+    },
+    "react-native": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@react-navigation/core": "^6.4.16",
+    "@react-navigation/native": "^6.1.18",
+    "@testing-library/dom": "^10.4.2",
+    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/react": "^16.1.0",
+    "@types/history": "^4.7.11",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@types/react-router": "^5.1.20",
+    "@types/react-router-dom": "^5.3.3",
+    "history": "^4.10.1",
+    "jsdom": "^25.0.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router": "^5.3.4",
+    "react-router-dom": "^5.3.4",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
