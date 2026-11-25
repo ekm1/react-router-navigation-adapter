@@ -29,11 +29,32 @@
     "./native": {
       "types": "./dist/index.native.d.ts",
       "default": "./dist/index.native.js"
+    },
+    "./lite": {
+      "react-native": {
+        "types": "./dist/lite/index.native.d.ts",
+        "default": "./dist/lite/index.native.js"
+      },
+      "browser": {
+        "types": "./dist/lite/index.web.d.ts",
+        "default": "./dist/lite/index.web.js"
+      },
+      "types": "./dist/lite/index.d.ts",
+      "default": "./dist/lite/index.js"
+    },
+    "./lite/web": {
+      "types": "./dist/lite/index.web.d.ts",
+      "default": "./dist/lite/index.web.js"
+    },
+    "./lite/native": {
+      "types": "./dist/lite/index.native.d.ts",
+      "default": "./dist/lite/index.native.js"
     }
   },
   "files": [
     "dist",
-    "src"
+    "src",
+    "lite"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",

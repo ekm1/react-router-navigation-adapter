@@ -5,8 +5,14 @@ One routing interface for shared screens, backed by:
 - **Web:** React Router v5 (`react-router-dom@^5.2`)
 - **Native:** React Navigation 7 (`@react-navigation/native@^7`, e.g. with `native-stack`)
 
-Routes are defined once as URL patterns. On web they are React Router routes; on native the
-`native: true` ones are React Navigation screens and everything else opens in your WebView.
+There are two layers. Pick one per app:
+
+- **Full layer** (`react-router-navigation-adapter`): routes are defined once as URL patterns.
+  On web they are React Router routes; on native the `native: true` ones are React Navigation
+  screens and everything else opens in your WebView. Covers nested navigators, the React Router
+  v5 compat API and guards everywhere. Most of this README.
+- **Compact layer** (`react-router-navigation-adapter/lite`): apps keep defining routes the normal
+  way, and shared modules/libraries use one small URL-based API. See [Compact layer](#compact-layer).
 
 ## Define routes once
 
@@ -158,7 +164,67 @@ reports `url` and `isExact` like React Router (for `exact: false` routes: the ma
 on web the adapter also routes `history.block` (including React Router's own `<Prompt>`) on its
 history instance into its guard list while mounted, instead of letting one replace the other.
 
-## Known differences
+## Compact layer
+
+For apps that define routes the normal way and only want a common API in shared modules and
+libraries. There is no `defineRoutes` and no provider:
+
+- **Web:** the app's React Router v5 `<Router>` and `<Route>`s.
+- **Native:** the app's `NavigationContainer`, navigators and its `linking.config` (the same
+  config used for deep links). URLs are turned into navigation actions with React Navigation's
+  `getStateFromPath` / `getActionFromState`, and the current screen's URL comes from
+  `getPathFromState`, respecting custom `getStateFromPath`/`getPathFromState` in `linking`.
+
+```tsx
+import { Link, useLocation, useNavigationGuard, useParams, useRouter } from 'react-router-navigation-adapter/lite';
+
+export function TicketActions({ dirty }: { dirty: boolean }) {
+  const router = useRouter();
+  const { query } = useLocation(); // { pathname, search, hash, query, path }
+  const { id } = useParams<{ id?: string }>();
+  useNavigationGuard(dirty, 'Discard your bet slip changes?');
+  return (
+    <>
+      <Pressable onPress={() => router.setQuery({ type: 'million' })} />
+      <Pressable onPress={() => router.navigate(`/myBets/${Number(id) + 1}`)} />
+      <Pressable onPress={() => router.goBack('/myBets')} />
+      <Link to="/myBets/settled">Settled</Link>
+    </>
+  );
+}
+```
+
+Optionally, the app wraps its tree in `<LiteConfig>` (from the same entry):
+
+```tsx
+<LiteConfig openWeb={(url) => host.openWebView(url)} onBackAtRoot={() => host.close()} getUserConfirmation={confirm}>
+```
+
+| API | Both platforms |
+| --- | --- |
+| `useRouter()` | `navigate(to)` adds an entry (web `history.push`, native stack `push`), and navigating to the current URL updates it in place. `push(to)` always adds one. `replace(to)` replaces it; the same screen is updated in place. Also `goBack(fallback?)`, `canGoBack()`, `setQuery(query, { merge = true, replace = true })` and `location`. `to` is a URL (`'/myBets/42?type=million'`, `'?type=acca'`, `'#legs'`) or `{ pathname?, query?, hash? }`. |
+| `goBack(fallback?)` with no history | `<LiteConfig onBackAtRoot>` (guarded), else `replace(fallback)` when given. |
+| `useLocation()`, `useQuery()` | `{ pathname, search, hash, query, path }`. |
+| `useParams()` | Path params: React Router's `useParams()` on web; on native, the route params that are not query params. Strings, unless the native linking config `parse`s them. |
+| `useNavigationGuard(when, message \| handler)` | Blocks leaving the current pathname (query-only changes pass): back, pushes, replaces, `goBack()` at the root and native `openWeb`. Native uses `usePreventRemove`, so native-stack also blocks the iOS swipe-back; use it inside a screen. Web shares one `history.block` among all guards on a history. |
+| `useNavigationListener((location) => ...)` | Every URL change, not the initial one, like `history.listen`. |
+| `<Link to>` | React Router's `<Link>` on web (real `<a href>`); `<Pressable accessibilityRole="link">` on native. |
+| `useIsFocused()`, `useFocusEffect()` | |
+
+On native, a URL the linking config does not match goes to `<LiteConfig openWeb>` (without it,
+it throws). A screen in the current stack is pushed (or replaced) there; anything else, such as a
+screen in another tab, is navigated to with the linking config's own action, like `useLinkTo`.
+
+What the compact layer leaves out, compared with the full layer:
+- No route names, `state`, `reset` or `go(-n)`: it is URL based only.
+- Web `canGoBack()` cannot tell the app's own history from earlier sites: on browser history it
+  is `window.history.length > 1`. Back at the root after a deep link in a new tab is detected.
+- A blocked browser back/forward is replayed as back.
+- On native, navigation outside the layer (a host's `navigation.navigate`, tab presses) and guards
+  outside screens are not intercepted.
+- Use one layer per app: the full layer's provider also routes `history.block` on web.
+
+## Known differences (full layer)
 
 - **Navigation outside the adapter on native.** Guards see navigation through the adapter (`useRouter`, `<Link>`, `history`, back buttons) and screen removal (swipe, hardware back). A host's direct `navigation.navigate(...)` or a tab bar press that only switches tabs is not intercepted. Layout guards (outside screens) cannot block the iOS swipe-back gesture; put the guard in the screen for that.
 - **`history.block` on native** is global like React Router's, but as it is not tied to a screen it cannot block the iOS swipe-back; prefer `<Prompt>` / `useNavigationGuard` in the screen.
