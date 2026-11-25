@@ -149,12 +149,19 @@ export interface BackAtRootContext {
 /** Confirmation used for string guard prompts. Web default: `window.confirm`; native default: `Alert.alert`. */
 export type GetUserConfirmation = (message: string, callback: (allow: boolean) => void) => void;
 
+/**
+ * What a guard is intercepting. The same name is reported on both platforms:
+ * `navigate()` → 'navigate', `push()` → 'push', `replace()`/`setParams()` → 'replace',
+ * `reset()` → 'reset', and every kind of going back (back button, swipe, `goBack()`,
+ * `go(-n)`, native pops) → 'goBack'.
+ */
 export type NavigationGuardAction =
   | 'navigate'
   | 'push'
   | 'replace'
   | 'goBack'
   | 'reset'
+  /** @deprecated No longer reported: pops are reported as 'goBack' on both platforms. */
   | 'pop'
   | 'unknown';
 

@@ -104,7 +104,8 @@ Navigating to a screen in another branch dispatches React Navigation's nested
 `navigate('Tabs', { screen: 'BetsTab', params: { screen: 'Ticket', params } })` from the deepest
 focused navigator. Within the focused stack it pushes, as before. `initialUrl` and
 `createLinking` build the nested state and nested `screens` config. Back across tabs follows the
-tab navigator's `backBehavior`.
+tab navigator's `backBehavior`. Web `<RouterView>` accepts `scope` and `children` and ignores them, so the same
+layout code compiles on both platforms.
 
 ## Use it in shared screens
 
@@ -120,11 +121,12 @@ router.navigate('/myBets/2?type=million'); // or a URL, or { name, params, query
 | `push(target)` | Always adds an entry. |
 | `replace(target)` | Replaces the entry. The same route is updated in place (the screen stays mounted). |
 | `goBack()` / `canGoBack()` | With no history: `onBackAtRoot` (guarded), else `parent`. |
-| `go(-n)` / `getLength()` | Back n entries in one guarded action (native `StackActions.pop(n)`), further than the stack allows behaves like `goBack()` at the root. |
+| `go(-n)` / `getLength()` | Back n entries in one guarded action (native `StackActions.pop(n)`). Going further back than the history allows calls `onBackAtRoot` (else `parent`) on both platforms. |
 | `setQuery(query, { merge = true, replace = true })` | `null` deletes a key. |
-| `setParams`, `reset(targets, index?)`, `buildUrl(target)` | |
+| `reset(targets, index?)` | Replaces the history with `targets` up to `index` (default: the last). `index` counts positions in `targets` on both platforms. On native, entries without a native screen are left out of the stack; when the indexed entry is one, the stack is reset to the native entries before it and the entry opens through `openWeb`. |
+| `setParams`, `buildUrl(target)` | |
 | `useRoute()`, `useParams()`, `useQuery()` | `{ name, path, pathname, params, query, hash, state, key, matchedPattern }`. Params that are not path params are query params. |
-| `useNavigationGuard(when, message \| handler)` | Blocks leaving the current location by any route: navigate/push/replace, back (also at the root before `onBackAtRoot`), `reset`, `go(-n)`, `setParams`/same-route `replace` that change the pathname, and native `openWeb`. Query-only changes pass. Works in screens and in layouts outside screens. Async `context.proceed()` is supported, and `context.nextPath` is the target URL when known. A guard applies while its screen is focused (on web a covered screen is unmounted). Native also uses `usePreventRemove`, so native-stack blocks the iOS swipe-back, and Android hardware back. Web uses one `history.block` plus `beforeunload`. |
+| `useNavigationGuard(when, message \| handler)` | Blocks leaving the current location by any route: navigate/push/replace, back (also at the root before `onBackAtRoot`), `reset`, `go(-n)`, `setParams`/same-route `replace` that change the pathname, and native `openWeb`. Query-only changes pass. Works in screens and in layouts outside screens. Async `context.proceed()` is supported. `context.action` is the same on both platforms: `'navigate'`, `'push'`, `'replace'` (also `setParams`), `'reset'`, or `'goBack'` for every kind of going back (back button, swipe, `goBack()`, `go(-n)`, native pops; `'pop'` is deprecated and no longer reported). `context.nextPath` is the target URL when known: undefined for going back, and for targets outside the route registry (e.g. a host-only screen), never a made-up URL; React Navigation's nested `{ screen, params }` targets resolve to the nested screen's URL. A guard applies while its screen is focused (on web a covered screen is unmounted). Native also uses `usePreventRemove`, so native-stack blocks the iOS swipe-back, and Android hardware back. Web uses one `history.block` plus `beforeunload`. |
 | `useNavigationListener((route, action) => ...)` | Like `history.listen` (analytics). Works outside screens. |
 | `useIsActive(target, params?, { exact })` | `NavLink`-style active state. |
 | `useIsFocused()`, `useFocusEffect()` | |
@@ -148,7 +150,8 @@ export default withRouter(({ history, location, match }) => (
 On native, `history` supports `push`/`replace` (absolute, `?search`, `#hash` and relative paths
 like `'42'` or `'../promotions'`), `go(-n)`, `goBack`, `block(prompt)`, `listen`, `action`,
 `length`, `location` and `createHref`; `goForward` does nothing. `match.params` holds raw strings.
-`withRouter` supports `wrappedComponentRef`, `WrappedComponent` and hoists statics. `matchPath`,
+`withRouter` supports `wrappedComponentRef`, `WrappedComponent` and hoists statics. `useRouteMatch()`
+reports `url` and `isExact` like React Router (for `exact: false` routes: the matched prefix). `matchPath`,
 `generatePath` and `useRouteMatch(path)` use the adapter's path syntax.
 
 `<Prompt>` is the adapter's own on both platforms. history v4 allows only one prompt at a time, so
@@ -159,7 +162,8 @@ history instance into its guard list while mounted, instead of letting one repla
 
 - **Navigation outside the adapter on native.** Guards see navigation through the adapter (`useRouter`, `<Link>`, `history`, back buttons) and screen removal (swipe, hardware back). A host's direct `navigation.navigate(...)` or a tab bar press that only switches tabs is not intercepted. Layout guards (outside screens) cannot block the iOS swipe-back gesture; put the guard in the screen for that.
 - **`history.block` on native** is global like React Router's, but as it is not tied to a screen it cannot block the iOS swipe-back; prefer `<Prompt>` / `useNavigationGuard` in the screen.
-- **`history.go(-n)` past the start** behaves like `goBack()` at the root on native and through the adapter's `go` on web; React Router's own web `history.go` clamps instead.
+- **`history.go(-n)` past the start** calls `onBackAtRoot` through the adapter's `router.go` on both platforms and through native `history.go`; React Router's own web `history.go` (compat on web) clamps instead.
+- **`reset()` with web-only entries** keeps them out of the native stack: back from a native entry after such a reset skips them, while web history keeps them.
 - **Web history before a reload** is unknown to the adapter: replaying a blocked back/forward to such an entry assumes back.
 - **`reset()` on web** cannot delete browser history, so the browser back button can still reach entries from before the reset. `canGoBack()` does account for the reset.
 - **Nested deep links** need `nestedIn` and assume the outermost `<RouterView>` navigator is the root of the container (`initialUrl` in a reused host container navigates instead).
