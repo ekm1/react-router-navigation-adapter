@@ -1,0 +1,10 @@
+{
+  "name": "react-router-navigation-adapter-lite",
+  "private": true,
+  "description": "Subpath stub for bundlers without package exports support (older Metro).",
+  "main": "../dist/lite/index.js",
+  "module": "../dist/lite/index.js",
+  "react-native": "../src/lite/index.native.ts",
+  "browser": "../dist/lite/index.web.js",
+  "types": "../dist/lite/index.d.ts"
+}

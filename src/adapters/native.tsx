@@ -168,19 +168,29 @@ const GUARD_ACTIONS: Record<string, NavigationGuardAction> = {
   RESET: 'reset',
 };
 
-/** Best-effort target URL from a React Navigation action (for `usePreventRemove` guards). */
+/**
+ * URL of a registered screen addressed as `name` + `params`, following React Navigation's nested
+ * form (`{ screen, params }`) through navigator routes. Undefined when the target is not in the
+ * registry (e.g. a host-only screen): guards get no URL rather than a made-up one.
+ */
+function registeredPath(name: string, params: any, registry: RouteRegistry<any>): string | undefined {
+  while (!registry.getRoute(name) && typeof params?.screen === 'string') {
+    name = params.screen;
+    params = params.params;
+  }
+  return registry.getRoute(name) ? unpackNativeRoute({ key: '', name, params }, registry).path : undefined;
+}
+
+/** Target URL of a React Navigation action, when known (for `usePreventRemove` guards). */
 function extractNextPath(action: NavigationAction, registry: RouteRegistry<any>): string | undefined {
   const payload = action.payload as any;
   if (!payload) return undefined;
-  if (action.type === 'REPLACE' || action.type === 'PUSH' || action.type === 'NAVIGATE') {
-    if (typeof payload.name === 'string') {
-      return unpackNativeRoute({ key: '', name: payload.name, params: payload.params }, registry).path;
-    }
-  } else if (action.type === 'RESET') {
+  if (action.type === 'RESET') {
     const leaf = getFocusedLeaf(payload as AnyState)?.route;
-    if (leaf) return unpackNativeRoute(leaf, registry).path;
+    return leaf ? registeredPath(leaf.name, leaf.params, registry) : undefined;
   }
-  return undefined;
+  // NAVIGATE, PUSH, REPLACE, POP_TO, JUMP_TO carry the target screen name.
+  return typeof payload.name === 'string' ? registeredPath(payload.name, payload.params, registry) : undefined;
 }
 
 /** Focused leaf route plus the keys of its navigator's routes. */
@@ -443,13 +453,17 @@ function createNativeController<TName extends string>(
     }
   };
 
-  const openWeb = (url: string) => {
+  /** The host's WebView opener; throws when there is none. */
+  const webOpener = (url: string) => {
     if (!internal.openWeb) {
       throw new Error(
         `[react-router-navigation-adapter] "${url}" has no native screen. Mark the route \`native: true\` and render it in <RouterView>, or pass \`openWeb\` to <RouterProvider>.`,
       );
     }
-    const open = internal.openWeb;
+    return internal.openWeb;
+  };
+  const openWeb = (url: string) => {
+    const open = webOpener(url);
     guarded('navigate', url, () => open(url));
   };
 
@@ -576,19 +590,31 @@ function createNativeController<TName extends string>(
       }
     },
     reset: (targets, index) => {
-      const resolved = (targets ?? [])
-        .map((entry) =>
-          typeof entry === 'string'
-            ? resolve(entry, undefined, undefined, false)
-            : resolve(entry.name, entry.params, entry, false),
-        )
-        .filter((r): r is Resolution => r !== null);
-      if (resolved.length === 0) return;
-      const { plan } = resolved[0];
+      if (!targets || targets.length === 0) return;
+      // `index` counts positions in `targets`, as on web: keep the entries up to it first.
+      const lastTarget = index === undefined ? targets.length - 1 : Math.max(0, Math.min(index, targets.length - 1));
+      const kept = targets.slice(0, lastTarget + 1);
+      const lastEntry = kept[kept.length - 1];
+      const focusedUrl = (
+        typeof lastEntry === 'string' ? registry.resolveTarget(lastEntry) : registry.resolveTarget(lastEntry.name, lastEntry.params, lastEntry)
+      ).path;
+      const resolved = kept.map((entry) =>
+        typeof entry === 'string'
+          ? resolve(entry, undefined, undefined, false)
+          : resolve(entry.name, entry.params, entry, false),
+      );
+      // The indexed entry has no native screen: it opens in the WebView over the reset stack.
+      const webUrl = resolved[resolved.length - 1] ? undefined : focusedUrl;
+      const open = webUrl ? webOpener(webUrl) : undefined;
+      const nativeEntries = resolved.filter((r): r is Resolution => r !== null);
+      if (nativeEntries.length === 0) {
+        if (webUrl) openWeb(webUrl);
+        return;
+      }
+      const { plan } = nativeEntries[0];
       const parentKey = plan.names.slice(0, -1).join('/');
-      const sameNav = resolved.filter((r) => r.plan.names.slice(0, -1).join('/') === parentKey);
-      const last = index === undefined ? sameNav.length - 1 : Math.max(0, Math.min(index, sameNav.length - 1));
-      const active = sameNav.slice(0, last + 1);
+      const active = nativeEntries.filter((r) => r.plan.names.slice(0, -1).join('/') === parentKey);
+      const last = active.length - 1;
       const routes = active.map((r) => ({ name: r.name, params: r.payload }));
       // Reset the owner when focused, else the deepest focused navigator on the way to it.
       const depth = plan.ownerFocused ? plan.names.length - 1 : plan.focusedDepth;
@@ -599,7 +625,11 @@ function createNativeController<TName extends string>(
           : { index: 0, routes: [{ name: plan.names[depth], state: nestState(plan.names.slice(depth + 1, -1), routes, last) }] };
       // Screens being removed run their own guards through usePreventRemove.
       const removing = getFocusedKeys(root()).filter((key) => findNavigatorOf(navigator, key));
-      guarded('reset', active[last]?.resolved.path, () => dispatch(CommonActions.reset(state as any), navigator), removing);
+      const perform = () => {
+        dispatch(CommonActions.reset(state as any), navigator);
+        if (webUrl) open!(webUrl);
+      };
+      guarded('reset', webUrl ?? active[last].resolved.path, perform, removing);
     },
     setParams: (partial) => {
       const next = resolveParamsUpdate(registry, route, partial);
