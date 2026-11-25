@@ -177,12 +177,26 @@ function useCurrentMatch(): CompatMatch {
   const { registry } = useUniversalRouterContext();
   const route = useRoute();
   return useMemo(() => {
-    const stringify = route.name ? registry.getRoute(route.name)?.stringify : undefined;
+    const def = route.name ? registry.getRoute(route.name) : undefined;
+    const stringify = def?.stringify;
     const params: Record<string, string | undefined> = {};
     for (const [key, value] of Object.entries(route.params)) {
       params[key] = value == null ? undefined : stringify?.[key] ? stringify[key](value) : String(value);
     }
-    return { params, path: route.matchedPattern ?? route.pathname, url: route.pathname, isExact: true };
+    const matched = route.matchedPattern
+      ? matchPath(route.pathname, {
+          path: route.matchedPattern,
+          exact: def?.exact,
+          strict: def?.strict,
+          sensitive: def?.sensitive,
+        })
+      : null;
+    return {
+      params,
+      path: route.matchedPattern ?? route.pathname,
+      url: matched ? matched.url : route.pathname,
+      isExact: matched ? matched.isExact : true,
+    };
   }, [registry, route]);
 }
 

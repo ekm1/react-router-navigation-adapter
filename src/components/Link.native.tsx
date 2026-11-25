@@ -68,7 +68,9 @@ function LinkImpl<TName extends string>({
       accessibilityLabel={accessibilityLabel}
       testID={testID}
       style={resolvedStyle}
-      accessibilityState={isActive ? { selected: true } : undefined}
+      accessibilityState={
+        isActive ? { ...rest.accessibilityState, selected: true } : rest.accessibilityState
+      }
       disabled={disabled}
       onPress={handlePress}
     >

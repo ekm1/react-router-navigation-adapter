@@ -162,11 +162,26 @@ const GUARD_ACTIONS: Record<string, NavigationGuardAction> = {
   PUSH: 'push',
   REPLACE: 'replace',
   GO_BACK: 'goBack',
-  POP: 'pop',
-  POP_TO: 'pop',
-  POP_TO_TOP: 'pop',
+  POP: 'goBack',
+  POP_TO: 'goBack',
+  POP_TO_TOP: 'goBack',
   RESET: 'reset',
 };
+
+/** Best-effort target URL from a React Navigation action (for `usePreventRemove` guards). */
+function extractNextPath(action: NavigationAction, registry: RouteRegistry<any>): string | undefined {
+  const payload = action.payload as any;
+  if (!payload) return undefined;
+  if (action.type === 'REPLACE' || action.type === 'PUSH' || action.type === 'NAVIGATE') {
+    if (typeof payload.name === 'string') {
+      return unpackNativeRoute({ key: '', name: payload.name, params: payload.params }, registry).path;
+    }
+  } else if (action.type === 'RESET') {
+    const leaf = getFocusedLeaf(payload as AnyState)?.route;
+    if (leaf) return unpackNativeRoute(leaf, registry).path;
+  }
+  return undefined;
+}
 
 /** Focused leaf route plus the keys of its navigator's routes. */
 function getFocusedLeaf(
@@ -505,11 +520,14 @@ function createNativeController<TName extends string>(
       // Same location: update in place. Otherwise add an entry, like `history.push` on web
       // (React Navigation's NAVIGATE would reuse a same-name screen instead).
       if (isCurrentScreen(r.name) && r.resolved.path === route.path) replaceInPlace(r.resolved);
+      else if (r.resolved.pathname === route.pathname) pushOrNavigate(r);
       else guarded('navigate', r.resolved.path, () => pushOrNavigate(r));
     },
     push: (target, params, options) => {
       const r = resolve(target, params, options);
-      if (r) guarded('push', r.resolved.path, () => pushOrNavigate(r));
+      if (!r) return;
+      if (r.resolved.pathname === route.pathname) pushOrNavigate(r);
+      else guarded('push', r.resolved.path, () => pushOrNavigate(r));
     },
     replace: (target, params, options) => {
       const r = resolve(target, params, options);
@@ -567,10 +585,11 @@ function createNativeController<TName extends string>(
         .filter((r): r is Resolution => r !== null);
       if (resolved.length === 0) return;
       const { plan } = resolved[0];
-      const routes = resolved
-        .filter((r) => r.plan.names.join('/') === plan.names.join('/'))
-        .map((r) => ({ name: r.name, params: r.payload }));
-      const last = index === undefined ? routes.length - 1 : Math.max(0, Math.min(index, routes.length - 1));
+      const parentKey = plan.names.slice(0, -1).join('/');
+      const sameNav = resolved.filter((r) => r.plan.names.slice(0, -1).join('/') === parentKey);
+      const last = index === undefined ? sameNav.length - 1 : Math.max(0, Math.min(index, sameNav.length - 1));
+      const active = sameNav.slice(0, last + 1);
+      const routes = active.map((r) => ({ name: r.name, params: r.payload }));
       // Reset the owner when focused, else the deepest focused navigator on the way to it.
       const depth = plan.ownerFocused ? plan.names.length - 1 : plan.focusedDepth;
       const navigator = plan.navigators[depth];
@@ -580,7 +599,7 @@ function createNativeController<TName extends string>(
           : { index: 0, routes: [{ name: plan.names[depth], state: nestState(plan.names.slice(depth + 1, -1), routes, last) }] };
       // Screens being removed run their own guards through usePreventRemove.
       const removing = getFocusedKeys(root()).filter((key) => findNavigatorOf(navigator, key));
-      guarded('reset', resolved[resolved.length - 1].resolved.path, () => dispatch(CommonActions.reset(state as any), navigator), removing);
+      guarded('reset', active[last]?.resolved.path, () => dispatch(CommonActions.reset(state as any), navigator), removing);
     },
     setParams: (partial) => {
       const next = resolveParamsUpdate(registry, route, partial);
@@ -588,8 +607,9 @@ function createNativeController<TName extends string>(
     },
     setQuery: (input, options) => {
       const next = { ...route, query: mergeQuery(route.query, input, options?.merge ?? true) };
-      if (options?.replace ?? true) replaceInPlace({ ...next, path: formatRelativeUrl(next.pathname, next.query, next.hash) });
-      else if (route.name) controller.push(route.name, route.params, next);
+      const nextUrl = formatRelativeUrl(next.pathname, next.query, next.hash);
+      if (options?.replace ?? true) replaceInPlace({ ...next, path: nextUrl });
+      else if (route.name) controller.push(nextUrl, undefined, { state: next.state });
     },
   };
   return controller;
@@ -668,7 +688,8 @@ function NativeRouterBridge<TName extends string>({
         usePreventRemove(when && focused, ({ data }) => {
           const proceed = () => nav.dispatch(data.action);
           const action = GUARD_ACTIONS[data.action.type] ?? 'unknown';
-          if (runGuard(handlerRef.current, action, proceed, ctx.confirm)) proceed();
+          const nextPath = extractNextPath(data.action, routes);
+          if (runGuard(handlerRef.current, action, proceed, ctx.confirm, nextPath)) proceed();
         });
       },
 

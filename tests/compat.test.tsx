@@ -212,6 +212,48 @@ describe.each<Platform>(['web', 'native'])('React Router v5 compat (%s)', (platf
     expect(screen.getByTestId('filters')).toHaveTextContent('Filters:/myBets');
     expect(ref.current).toBeInstanceOf(Filters);
   });
+
+  it('useRouteMatch() returns isExact: false and matched prefix url on exact:false routes', () => {
+    let currentMatch: any = null;
+    function BetsScreen() {
+      currentMatch = api.useRouteMatch();
+      return <span data-testid="bets">{useRoute().pathname}</span>;
+    }
+    const routes = defineRoutes({
+      Bets: { path: '/bets', component: BetsScreen, native: true, exact: false },
+    });
+    if (platform === 'web') {
+      render(
+        <WebRouterProvider routes={routes} routerType="memory" initialEntries={['/bets/123']}>
+          <WebRouterView />
+        </WebRouterProvider>,
+      );
+    } else {
+      const Stack = createTestStackNavigator();
+      render(
+        <NativeRouterProvider routes={routes} initialUrl="/bets/123">
+          <NativeRouterView navigator={Stack} />
+        </NativeRouterProvider>,
+      );
+    }
+    expect(currentMatch).toMatchObject({ path: '/bets', url: '/bets', isExact: false });
+  });
+
+  it('<Prompt message={(loc) => ...}> receives target pathname on history.replace', () => {
+    const confirm = vi.fn<GetUserConfirmation>((_m, cb) => cb(false));
+    promptProps = {
+      when: true,
+      message: (loc: { pathname: string }) => (loc.pathname === '/promotions' ? true : 'Leave?'),
+    };
+    renderApp(platform, '/myBets/1', confirm);
+    act(() => captured.history.replace('/myBets'));
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(focusedPath()).toBe('/myBets/1');
+    act(() => captured.history.replace('/promotions'));
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(focusedPath()).toBe('/promotions');
+    promptProps = null;
+  });
 });
 
 describe('Web compat only', () => {

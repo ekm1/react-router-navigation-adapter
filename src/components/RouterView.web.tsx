@@ -14,7 +14,11 @@ export interface WebRouterViewProps<TName extends string = string> {
     Screen: React.ComponentType<any>;
   };
   /** Accepted for API symmetry with native `<RouterView>`; ignored on web. */
-  initialRouteName?: TName;
+  initialRouteName?: TName | (string & {});
+  /** Accepted for API symmetry with native `<RouterView>`; ignored on web. */
+  scope?: string[];
+  /** Accepted for API symmetry with native `<RouterView>`; ignored on web. */
+  children?: React.ReactNode;
   /** Accepted for API symmetry with native `<RouterView>`; ignored on web. */
   screenOptions?: Record<string, unknown> | ((props: any) => Record<string, unknown>);
   /** Accepted for API symmetry with native `<RouterView>`; ignored on web. */

@@ -328,3 +328,128 @@ describe('B3 nested navigators', () => {
     expect(screens.Settings.path).toBe('settings');
   });
 });
+
+describe.each<Platform>(['web', 'native'])('B6 remaining parity guarantees (%s)', (platform) => {
+  it('multi-route reset builds the full stack and goBack returns to the previous entry', () => {
+    renderApp(platform, { initialUrl: '/bets/99' });
+    act(() => captured.screen!.reset(['MyBets', { name: 'Ticket', params: { id: '42' } }]));
+    expect(focusedPath()).toBe('/myBets/42');
+    expect(captured.screen!.getLength()).toBe(2);
+    expect(captured.screen!.canGoBack()).toBe(true);
+    act(() => captured.screen!.goBack());
+    expect(focusedPath()).toBe('/myBets');
+  });
+
+  it('reset with explicit index slices to that index and reports its path as nextPath', () => {
+    const seen: Array<{ action: string; nextPath?: string }> = [];
+    function SpyScreen() {
+      useNavigationGuard(true, (ctx) => {
+        seen.push({ action: ctx.action, nextPath: ctx.nextPath });
+        return true;
+      });
+      return <Screen name="Spy" />;
+    }
+    const spyRoutes = defineRoutes({
+      MyBets: { path: '/myBets', component: () => <Screen name="MyBets" />, native: true },
+      Ticket: { path: '/myBets/:id', component: SpyScreen, native: true },
+    });
+    if (platform === 'web') {
+      render(
+        <WebRouterProvider routes={spyRoutes} routerType="memory" initialEntries={['/myBets/1']}>
+          <WebRouterView />
+        </WebRouterProvider>,
+      );
+    } else {
+      const Stack = createTestStackNavigator();
+      render(
+        <NativeRouterProvider routes={spyRoutes} initialUrl="/myBets/1">
+          <NativeRouterView navigator={Stack} />
+        </NativeRouterProvider>,
+      );
+    }
+    act(() => captured.screen!.reset(['MyBets', { name: 'Ticket', params: { id: '2' } }], 0));
+    expect(focusedPath()).toBe('/myBets');
+    expect(captured.screen!.getLength()).toBe(1);
+    expect(seen).toEqual([{ action: 'reset', nextPath: '/myBets' }]);
+  });
+
+  it('query-only navigate, push, and setQuery(replace: false) pass guards', () => {
+    const confirm = vi.fn<GetUserConfirmation>((_m, cb) => cb(false));
+    renderApp(platform, { initialUrl: '/myBets/1', guard: true, layoutGuard: true, confirm });
+    act(() => captured.screen!.navigate('/myBets/1?tab=settled'));
+    expect(focusedPath()).toBe('/myBets/1?tab=settled');
+    act(() => captured.screen!.push('/myBets/1?tab=open'));
+    expect(focusedPath()).toBe('/myBets/1?tab=open');
+    act(() => captured.screen!.setQuery({ sort: 'asc' }, { replace: false }));
+    expect(focusedPath()).toBe('/myBets/1?tab=open&sort=asc');
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it('setQuery(replace: false) preserves trailing segments on exact:false routes', () => {
+    renderApp(platform, { initialUrl: '/bets/123' });
+    act(() => captured.screen!.setQuery({ sort: 'asc' }, { replace: false }));
+    expect(focusedPath()).toBe('/bets/123?sort=asc');
+    act(() => captured.screen!.goBack());
+    expect(focusedPath()).toBe('/bets/123');
+  });
+
+  it('go(-n) past stack depth when depth > 0 invokes onBackAtRoot', () => {
+    const onBackAtRoot = vi.fn();
+    renderApp(platform, { initialUrl: '/myBets', onBackAtRoot });
+    act(() => captured.screen!.push('Ticket', { id: '1' }));
+    expect(captured.screen!.getLength()).toBe(2);
+    act(() => captured.screen!.go(-5));
+    expect(onBackAtRoot).toHaveBeenCalledTimes(1);
+  });
+
+  it('guard receives identical action and nextPath for navigate, push, replace, reset, and go(-n)', () => {
+    const events: Array<{ action: string; nextPath?: string }> = [];
+    let block = false;
+    function Guarded() {
+      useNavigationGuard(block, (ctx) => {
+        events.push({ action: ctx.action, nextPath: ctx.nextPath });
+        return false;
+      });
+      return <Screen name="Ticket" />;
+    }
+    const testRoutes = defineRoutes({
+      MyBets: { path: '/myBets', component: () => <Screen name="MyBets" />, native: true },
+      Ticket: { path: '/myBets/:id', component: Guarded, native: true },
+    });
+    if (platform === 'web') {
+      render(
+        <WebRouterProvider routes={testRoutes} routerType="memory" initialEntries={['/myBets']}>
+          <WebRouterView />
+        </WebRouterProvider>,
+      );
+    } else {
+      const Stack = createTestStackNavigator();
+      render(
+        <NativeRouterProvider routes={testRoutes} initialUrl="/myBets">
+          <NativeRouterView navigator={Stack} />
+        </NativeRouterProvider>,
+      );
+    }
+    act(() => captured.screen!.push('Ticket', { id: '1' }));
+    act(() => captured.screen!.push('Ticket', { id: '2' }));
+    block = true;
+    act(() => captured.screen!.setQuery({ armed: '1' }));
+    events.length = 0;
+
+    act(() => captured.screen!.navigate('MyBets'));
+    act(() => captured.screen!.push('MyBets'));
+    act(() => captured.screen!.replace('MyBets'));
+    act(() => captured.screen!.reset(['MyBets']));
+    act(() => captured.screen!.go(-2));
+
+    expect(events.map((e) => e.action)).toEqual(['navigate', 'push', 'replace', 'reset', 'goBack']);
+    expect(events.slice(0, 4).map((e) => e.nextPath)).toEqual([
+      '/myBets',
+      '/myBets',
+      '/myBets',
+      '/myBets',
+    ]);
+    block = false;
+  });
+});
+

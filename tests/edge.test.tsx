@@ -154,6 +154,35 @@ describe('<Link> forwards refs and extra props', () => {
     fireEvent.contextMenu(link);
     expect(onLongPress).toHaveBeenCalled();
   });
+
+  it('native: preserves caller accessibilityState when active and inactive', () => {
+    function Home() {
+      return (
+        <>
+          <NativeLink to="MyBets" accessibilityState={{ busy: true }} testID="active-busy-link">
+            Bets
+          </NativeLink>
+          <NativeLink to="Other" accessibilityState={{ busy: true }} testID="inactive-busy-link">
+            Other
+          </NativeLink>
+        </>
+      );
+    }
+    const homeRoutes = defineRoutes({
+      MyBets: { path: '/myBets', component: Home, native: true },
+      Other: { path: '/other', component: () => null, native: true },
+    });
+    const Stack = createTestStackNavigator();
+    render(
+      <NativeRouterProvider routes={homeRoutes}>
+        <NativeRouterView navigator={Stack} />
+      </NativeRouterProvider>,
+    );
+    expect(screen.getByTestId('active-busy-link')).toHaveAttribute('aria-busy', 'true');
+    expect(screen.getByTestId('active-busy-link')).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByTestId('inactive-busy-link')).toHaveAttribute('aria-busy', 'true');
+    expect(screen.getByTestId('inactive-busy-link')).not.toHaveAttribute('aria-selected');
+  });
 });
 
 describe('Web <Redirect> delegates to React Router', () => {

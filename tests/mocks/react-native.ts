@@ -77,7 +77,7 @@ export const Pressable = React.forwardRef(function Pressable(
     testID?: string;
     accessibilityRole?: string;
     accessibilityLabel?: string;
-    accessibilityState?: { selected?: boolean };
+    accessibilityState?: { selected?: boolean; busy?: boolean };
     style?: any;
   },
   ref: React.ForwardedRef<HTMLButtonElement>,
@@ -92,6 +92,7 @@ export const Pressable = React.forwardRef(function Pressable(
       'aria-label': accessibilityLabel,
       'aria-disabled': disabled || undefined,
       'aria-selected': accessibilityState?.selected || undefined,
+      'aria-busy': accessibilityState?.busy || undefined,
       'data-testid': testID,
       'data-hit-slop': hitSlop,
       disabled: Boolean(disabled),

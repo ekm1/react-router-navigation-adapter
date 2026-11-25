@@ -66,6 +66,7 @@ interface WebInternalState {
   addGuard: (handler: GuardHandlerRef) => () => void;
   runGuards: (action: NavigationGuardAction, proceed: () => void, nextPath?: string) => boolean;
   bypassRef: React.MutableRefObject<boolean>;
+  pendingActionRef: React.MutableRefObject<NavigationGuardAction | null>;
   onBackAtRoot?: (ctx: BackAtRootContext) => void;
 }
 
@@ -139,9 +140,14 @@ function createWebController<TName extends string>(
     buildUrl: (target, params, options) => registry.resolveTarget(target, params, options).path,
     navigate: (target, params, options) => {
       const resolved = registry.resolveTarget(target, params, options);
-      // Same location: update in place instead of stacking a duplicate entry (like <Link>).
-      if (resolved.path === route.path) history.replace(toLocation(resolved));
-      else history.push(toLocation(resolved));
+      internal.pendingActionRef.current = 'navigate';
+      try {
+        // Same location: update in place instead of stacking a duplicate entry (like <Link>).
+        if (resolved.path === route.path) history.replace(toLocation(resolved));
+        else history.push(toLocation(resolved));
+      } finally {
+        internal.pendingActionRef.current = null;
+      }
     },
     push: (target, params, options) =>
       history.push(toLocation(registry.resolveTarget(target, params, options))),
@@ -152,7 +158,10 @@ function createWebController<TName extends string>(
     go: (delta) => {
       if (delta >= 0) return;
       if (-delta <= internal.depth()) history.go(delta);
-      else controller.goBack();
+      else
+        backAtRoot(registry, route, controller, internal.onBackAtRoot, (proceed) =>
+          internal.runGuards('goBack', proceed),
+        );
     },
     goBack: () => {
       if (internal.canGoBack()) history.goBack();
@@ -215,6 +224,7 @@ function WebRouterBridge<TName extends string>({
 
   const bypassRef = useRef(false);
   const bypassPopRef = useRef(false);
+  const pendingActionRef = useRef<NavigationGuardAction | null>(null);
   const guardsRef = useRef(new Set<GuardHandlerRef>());
   const unblockRef = useRef<(() => void) | null>(null);
   const confirmRef = useRef<GetUserConfirmation>(defaultConfirm);
@@ -303,7 +313,8 @@ function WebRouterBridge<TName extends string>({
       // Query/hash-only changes (setQuery/setParams on the same path) do not leave the screen.
       if (location.pathname === history.location.pathname) return undefined;
       const nextPath = `${location.pathname}${location.search}${location.hash}`;
-      return runGuards(GUARD_ACTIONS[action], () => replay(location, action), nextPath) ? undefined : false;
+      const guardAction = pendingActionRef.current ?? GUARD_ACTIONS[action];
+      return runGuards(guardAction, () => replay(location, action), nextPath) ? undefined : false;
     };
 
     const onBeforeUnload = (event: BeforeUnloadEvent) => {
@@ -354,6 +365,7 @@ function WebRouterBridge<TName extends string>({
       },
       runGuards,
       bypassRef,
+      pendingActionRef,
       get onBackAtRoot() {
         return backAtRootRef.current;
       },

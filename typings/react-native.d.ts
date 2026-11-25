@@ -9,7 +9,7 @@ declare module 'react-native' {
     testID?: string;
     accessibilityRole?: string;
     accessibilityLabel?: string;
-    accessibilityState?: { selected?: boolean; disabled?: boolean };
+    accessibilityState?: { selected?: boolean; disabled?: boolean; busy?: boolean };
     hitSlop?: number | { top?: number; bottom?: number; left?: number; right?: number };
     onLongPress?: (event?: any) => void;
     ref?: any;

@@ -171,7 +171,7 @@ export interface NavigationGuardContext {
 /**
  * Guard callback invoked before leaving the current screen.
  * Return `false` or call `context.preventDefault()` to block navigation.
- * Returning a non-empty string uses it as a confirmation prompt on web and blocks on native.
+ * Returning a non-empty string uses it as a confirmation prompt via `getUserConfirmation` (web: `window.confirm`, native: `Alert.alert`).
  */
 export type NavigationGuardCallback = (
   context: NavigationGuardContext,
