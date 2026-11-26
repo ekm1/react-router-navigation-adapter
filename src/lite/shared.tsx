@@ -26,8 +26,14 @@ export interface LiteLocation {
   path: string;
 }
 
-/** A URL ("/myBets/42?type=million", "?type=million", "#legs") or its parts. */
+/** A URL ("/items/42?sort=asc", "?sort=asc", "#section") or its parts. */
 export type LiteTo = string | { pathname?: string; query?: QueryInput; hash?: string };
+
+/** Action reported to `useNavigationListener` in the compact layer. */
+export type LiteNavigationAction = 'push' | 'replace' | 'goBack';
+
+/** Callback passed to `useNavigationListener` in the compact layer. */
+export type LiteNavigationListener = (location: LiteLocation, action: LiteNavigationAction) => void;
 
 export interface LiteRouter {
   /** Adds a history entry (web `history.push`, native stack `push`); the current URL is updated in place. */
@@ -36,11 +42,15 @@ export interface LiteRouter {
   push: (to: LiteTo) => void;
   /** Replaces the current entry (the same screen is updated in place). */
   replace: (to: LiteTo) => void;
-  /** Goes back; with no history: `<LiteConfig onBackAtRoot>`, else `replace(fallback)` when given. */
+  /** Goes back; with no history: `replace(fallback)` when given, else `<LiteConfig onBackAtRoot>`. */
   goBack: (fallback?: LiteTo) => void;
   canGoBack: () => boolean;
   /** Updates query params (`null` deletes a key). Defaults: merge, replace. */
   setQuery: (query: QueryInput, options?: SetQueryOptions) => void;
+  /** Navigate to an external URL (guarded). Web: `onExternal` else `window.location.assign`/`replace`; Native: `onExternal`/`openWeb`. */
+  openExternal: (url: string, options?: import('../types').ExternalNavigationOptions) => void;
+  /** Reload the current view (guarded). Web: `onReload` else `window.location.reload()`; Native: `onReload` else warn & no-op. */
+  reload: () => void;
   location: LiteLocation;
   platform: 'web' | 'native';
 }
@@ -48,6 +58,10 @@ export interface LiteRouter {
 export interface LiteConfigValue {
   /** Native: URLs the app's linking config does not match (e.g. open a WebView). Without it they throw. */
   openWeb?: (url: string) => void;
+  /** Cross-platform external URL handler (alias for `openWeb` on native). */
+  onExternal?: (url: string) => void;
+  /** Optional handler invoked by `router.reload()`. */
+  onReload?: () => void;
   /** `goBack()` with no history (e.g. close the host). */
   onBackAtRoot?: () => void;
   /** Confirmation for string guards. Web default: `window.confirm`; native default: `Alert.alert`. */
@@ -91,6 +105,18 @@ export interface LiteLinkProps {
   children?: React.ReactNode;
   style?: any;
   className?: string;
+  activeClassName?: string;
+  activeStyle?: any;
+  exact?: boolean;
+  strict?: boolean;
+  sensitive?: boolean;
+  isActive?: import('../types').LinkIsActive;
+  component?: React.ComponentType<any>;
+  disabled?: boolean;
+  onClick?: (event?: any) => void;
+  onPress?: (event?: any) => void;
+  target?: string;
+  rel?: string;
   testID?: string;
   accessibilityLabel?: string;
 }

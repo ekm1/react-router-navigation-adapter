@@ -23,6 +23,7 @@ function TestStackView({ state, descriptors }: { state: any; descriptors: any })
             key={route.key}
             data-testid={`rn-screen-${route.name}`}
             data-focused={String(isFocused)}
+            data-presentation={String(descriptors[route.key].options?.presentation ?? 'card')}
             data-prevent-native-dismiss={String(Boolean(preventedRoutes[route.key]?.preventRemove))}
             style={{ display: isFocused ? 'block' : 'none' }}
           >

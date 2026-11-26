@@ -1,10 +1,26 @@
-import { normalizeQueryInput, parseRelativeUrl } from './pathUtils';
+import { isValidElement, type ReactElement } from 'react';
+import {
+  extractParamNames,
+  extractRequiredParamNames,
+  formatRelativeUrl,
+  generatePathFromPattern,
+  joinBaseAndOverlay,
+  normalizeHash,
+  normalizeQueryInput,
+  parseRelativeUrl,
+  stringifyQueryParams,
+} from './pathUtils';
 import type {
   BackAtRootContext,
   GetUserConfirmation,
   HistoryAction,
+  LinkIsActive,
+  LinkLocation,
+  LinkMatch,
   NavigationGuardAction,
   NavigationGuardCallback,
+  NavigationOptions,
+  NavigationTarget,
   QueryInput,
   QueryParams,
   ResolvedNavigationIntent,
@@ -114,6 +130,36 @@ export function mergeQuery(current: QueryParams, input: QueryInput, merge: boole
 }
 
 /**
+ * Resolves a navigation target relative to the current route.
+ * For `overlay: true` routes targeted by name or target object, prepends the current base pathname
+ * so `navigate('PreviewOverlay', { previewId: '123' })` on `/projects/42` resolves to `/projects/42/preview/123`.
+ */
+export function resolveTargetFromRoute<TName extends string>(
+  registry: RouteRegistry<TName>,
+  currentRoute: UnifiedRoute<TName>,
+  target: NavigationTarget<TName>,
+  params?: RouteParams,
+  options?: NavigationOptions,
+  context?: unknown,
+): ResolvedNavigationIntent<TName> {
+  const resolved = registry.resolveTarget(target, params, options, context);
+  const isUrlTarget =
+    typeof target === 'string' &&
+    (target.startsWith('/') || /^[a-zA-Z][a-zA-Z\d+\-.]*:\/\//.test(target));
+  if (resolved.isOverlay && !isUrlTarget) {
+    const basePathname = currentRoute.basePathname ?? currentRoute.pathname;
+    const pathname = joinBaseAndOverlay(basePathname, resolved.pathname);
+    return {
+      ...resolved,
+      basePathname,
+      pathname,
+      path: formatRelativeUrl(pathname, resolved.query, resolved.hash),
+    };
+  }
+  return resolved;
+}
+
+/**
  * `setParams(partial)` target: path params and extra (query) params merged over the current
  * route, with keys from `partial` winning over the current query. Same on both platforms.
  */
@@ -121,19 +167,80 @@ export function resolveParamsUpdate(
   registry: RouteRegistry<any>,
   route: UnifiedRoute<any>,
   partial: RouteParams,
+  context?: unknown,
 ): ResolvedNavigationIntent<any> | null {
   if (!route.name) return null;
   const query = { ...route.query };
   for (const key of Object.keys(partial)) delete query[key];
-  return registry.resolveTarget(route.name, { ...route.params, ...partial }, {
-    query,
-    hash: route.hash,
-    state: route.state,
-  });
+  const mergedParams = { ...route.params, ...partial };
+  const def = registry.getRoute(route.name);
+  const applyOverlayPrefix = (intent: ResolvedNavigationIntent<any>): ResolvedNavigationIntent<any> => {
+    if (!intent.isOverlay || !route.basePathname) return intent;
+    const pathname = joinBaseAndOverlay(route.basePathname, intent.pathname);
+    return {
+      ...intent,
+      basePathname: route.basePathname,
+      pathname,
+      path: formatRelativeUrl(pathname, intent.query, intent.hash),
+    };
+  };
+  if (def && def.paths.length > 1 && route.matchedPattern && def.paths.includes(route.matchedPattern)) {
+    const preferredParams = extractParamNames(route.matchedPattern);
+    const preferredRequired = extractRequiredParamNames(route.matchedPattern);
+    const preferredSatisfied = preferredRequired.every(
+      (k) => mergedParams[k] !== undefined && mergedParams[k] !== null,
+    );
+    if (preferredSatisfied) {
+      const preferredConsumed = preferredParams.filter(
+        (k) => mergedParams[k] !== undefined && mergedParams[k] !== null,
+      ).length;
+      const anyBetter = def.paths.some((p) => {
+        const req = extractRequiredParamNames(p);
+        if (!req.every((k) => mergedParams[k] !== undefined && mergedParams[k] !== null)) return false;
+        const consumed = extractParamNames(p).filter(
+          (k) => mergedParams[k] !== undefined && mergedParams[k] !== null,
+        ).length;
+        return consumed > preferredConsumed;
+      });
+      if (!anyBetter) {
+        const pathParams: RouteParams = {};
+        const extra: QueryInput = {};
+        for (const [k, v] of Object.entries(mergedParams)) {
+          if (preferredParams.includes(k)) pathParams[k] = v;
+          else extra[k] = v as QueryInput[string];
+        }
+        const mergedQuery = { ...normalizeQueryInput(extra), ...query };
+        const pathname = generatePathFromPattern(route.matchedPattern, pathParams, def.stringify);
+        return applyOverlayPrefix({
+          name: route.name,
+          params: pathParams,
+          query: mergedQuery,
+          hash: route.hash,
+          state: route.state,
+          pathname,
+          path: formatRelativeUrl(pathname, mergedQuery, route.hash),
+          matchedPattern: route.matchedPattern,
+          ...(def.overlay ? { isOverlay: true } : {}),
+        });
+      }
+    }
+  }
+  return applyOverlayPrefix(
+    registry.resolveTarget(
+      route.name,
+      mergedParams,
+      {
+        query,
+        hash: route.hash,
+        state: route.state,
+      },
+      context,
+    ),
+  );
 }
 
 /**
- * `goBack()` with no history: provider handler first, then the route's `parent`.
+ * `goBack()` with no history: the route's `parent` first, then the provider's `onBackAtRoot`.
  * `guard(proceed)` runs navigation guards before `onBackAtRoot` (the `parent` replace is
  * guarded by the normal navigation path).
  */
@@ -143,12 +250,183 @@ export function backAtRoot(
   router: RouterController<any>,
   onBackAtRoot?: (ctx: BackAtRootContext) => void,
   guard?: (proceed: () => void) => boolean,
+  context?: unknown,
 ): void {
+  const parent = registry.resolveParent(route, context);
+  if (parent) {
+    router.replace(parent.path, undefined, { state: parent.state });
+    return;
+  }
   if (onBackAtRoot) {
     const leave = () => onBackAtRoot({ route, router });
     if (!guard || guard(leave)) leave();
-    return;
   }
-  const parent = registry.resolveParent(route);
-  if (parent) router.replace(parent.path, undefined, { state: parent.state });
 }
+
+export type EntryGuardEvaluation<TName extends string = string> =
+  | { kind: 'allow'; intent: ResolvedNavigationIntent<TName> }
+  | { kind: 'element'; element: ReactElement; intent: ResolvedNavigationIntent<TName> }
+  | { kind: 'redirect'; intent: ResolvedNavigationIntent<TName> };
+
+const MAX_GUARD_HOPS = 10;
+
+/**
+ * Evaluates route-level entry `guard(route, context)` hooks along any redirect chain.
+ * - Returns `{ kind: 'allow', intent }` when allowed.
+ * - Returns `{ kind: 'element', element, intent }` when a guard returns an alternative ReactElement.
+ * - Returns `{ kind: 'redirect', intent }` when one or more guards redirect to another target.
+ */
+export function resolveEntryGuardChain<TName extends string>(
+  registry: RouteRegistry<TName>,
+  initialIntent: ResolvedNavigationIntent<TName>,
+  routeContext?: unknown,
+): EntryGuardEvaluation<TName> {
+  let current = initialIntent;
+  let redirected = false;
+
+  for (let hop = 0; hop < MAX_GUARD_HOPS; hop += 1) {
+    if (!current.name) {
+      return redirected ? { kind: 'redirect', intent: current } : { kind: 'allow', intent: current };
+    }
+    const def = registry.getRoute(current.name);
+    if (!def?.guard) {
+      return redirected ? { kind: 'redirect', intent: current } : { kind: 'allow', intent: current };
+    }
+    const candidate: UnifiedRoute<TName> = {
+      name: current.name,
+      path: current.path,
+      pathname: current.pathname,
+      params: current.params,
+      query: current.query,
+      hash: current.hash,
+      state: current.state,
+      matchedPattern: current.matchedPattern ?? def.path,
+      ...(current.isOverlay ? { isOverlay: true, basePathname: current.basePathname } : {}),
+    };
+    const result = def.guard(candidate, routeContext);
+    if (result === true || result === undefined) {
+      return redirected ? { kind: 'redirect', intent: current } : { kind: 'allow', intent: current };
+    }
+    if (isValidElement(result)) {
+      return redirected
+        ? { kind: 'redirect', intent: current }
+        : { kind: 'element', element: result, intent: current };
+    }
+    const next = registry.resolveTarget(
+      result as NavigationTarget<TName>,
+      undefined,
+      undefined,
+      routeContext,
+    );
+    if (next.path === current.path && next.name === current.name) {
+      throw new Error(
+        `[react-router-navigation-adapter] Entry guard on route "${current.name}" redirected to itself ("${current.path}").`,
+      );
+    }
+    current = next;
+    redirected = true;
+  }
+
+  throw new Error(
+    `[react-router-navigation-adapter] Entry guard redirect chain exceeded ${MAX_GUARD_HOPS} hops (possible redirect cycle).`,
+  );
+}
+
+/**
+ * Render-time evaluation of a route's entry guard for `<RouterView>` (covers back/forward,
+ * initial loads, SSR, alternative elements, and reactive `routeContext` updates).
+ */
+export function evaluateEntryGuard<TName extends string>(
+  registry: RouteRegistry<TName>,
+  route: UnifiedRoute<TName>,
+  routeContext?: unknown,
+): EntryGuardEvaluation<TName> {
+  const intent: ResolvedNavigationIntent<TName> = {
+    name: route.name,
+    params: route.params,
+    query: route.query,
+    hash: route.hash,
+    state: route.state,
+    pathname: route.pathname,
+    path: route.path,
+    matchedPattern: route.matchedPattern ?? undefined,
+    ...(route.isOverlay ? { isOverlay: true, basePathname: route.basePathname } : {}),
+  };
+  return resolveEntryGuardChain(registry, intent, routeContext);
+}
+
+/** Converts a `UnifiedRoute` into the `LinkLocation` shape passed to `Link`'s `isActive(match, location)`. */
+export function toLinkLocation(route: UnifiedRoute<any>): LinkLocation {
+  return {
+    pathname: route.pathname,
+    search: stringifyQueryParams(route.query),
+    hash: route.hash ? `#${normalizeHash(route.hash)}` : '',
+    state: route.state,
+    key: route.key,
+  };
+}
+
+/**
+ * Computes a React Router v5 `NavLink`-compatible match object for `targetPathname`
+ * against `currentPathname` honoring `exact`, `strict`, and `sensitive`.
+ */
+export function computeLinkMatch(
+  targetPathname: string,
+  currentPathname: string,
+  options: { exact?: boolean; strict?: boolean; sensitive?: boolean } = {},
+): LinkMatch | null {
+  const { exact = false, strict = false, sensitive = false } = options;
+  const trim = (p: string) => (p.length > 1 && p.endsWith('/') ? p.slice(0, -1) : p);
+  const rawTarget = strict ? targetPathname : trim(targetPathname);
+  const rawCurrent = strict ? currentPathname : trim(currentPathname);
+  const cmpTarget = sensitive ? rawTarget : rawTarget.toLowerCase();
+  const cmpCurrent = sensitive ? rawCurrent : rawCurrent.toLowerCase();
+
+  if (cmpCurrent === cmpTarget) {
+    return {
+      params: {},
+      isExact: true,
+      path: targetPathname,
+      url: rawCurrent,
+    };
+  }
+
+  if (exact) return null;
+
+  if (cmpTarget === '/') {
+    if (!cmpCurrent.startsWith('/')) return null;
+    return {
+      params: {},
+      isExact: false,
+      path: targetPathname,
+      url: '/',
+    };
+  }
+
+  const prefixWithSlash = cmpTarget.endsWith('/') ? cmpTarget : `${cmpTarget}/`;
+  if (cmpCurrent.startsWith(prefixWithSlash)) {
+    const matchedUrl = rawCurrent.slice(0, rawTarget.length);
+    return {
+      params: {},
+      isExact: false,
+      path: targetPathname,
+      url: matchedUrl,
+    };
+  }
+
+  return null;
+}
+
+/** Evaluates whether a link is active using `NavLink` semantics and optional custom `isActive(match, location)`. */
+export function resolveLinkActive(
+  targetPathname: string,
+  location: LinkLocation,
+  options: { exact?: boolean; strict?: boolean; sensitive?: boolean; isActive?: LinkIsActive } = {},
+): boolean {
+  const match = computeLinkMatch(targetPathname, location.pathname, options);
+  if (options.isActive) {
+    return Boolean(options.isActive(match, location));
+  }
+  return Boolean(match);
+}
+

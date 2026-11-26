@@ -65,6 +65,7 @@ function createApp(platform: Platform) {
       <div data-testid="screen-mybets">
         <button data-testid="open-1" onClick={() => router.navigate('Ticket', { id: '1' })} />
         <button data-testid="open-promotions" onClick={() => router.navigate('Promotions')} />
+        <button data-testid="back-list" onClick={() => router.goBack()} />
       </div>
     );
   }
@@ -208,18 +209,20 @@ describe.each<Platform>(['web', 'native'])('My Bets host scenarios (%s)', (platf
     expect(text('ticket-path')).toBe('/myBets/9?type=acca');
   });
 
-  it('goBack at the root calls onBackAtRoot (e.g. close the host)', () => {
+  it('goBack at the root calls onBackAtRoot when the route has no parent (e.g. close the host)', () => {
     const onBackAtRoot = vi.fn();
-    createApp(platform).renderApp({ initialUrl: '/myBets/42', onBackAtRoot });
-    click('back');
+    createApp(platform).renderApp({ initialUrl: '/myBets', onBackAtRoot });
+    click('back-list');
     expect(onBackAtRoot).toHaveBeenCalledTimes(1);
-    expect(onBackAtRoot.mock.calls[0][0].route.path).toBe('/myBets/42');
+    expect(onBackAtRoot.mock.calls[0][0].route.path).toBe('/myBets');
     expect(typeof onBackAtRoot.mock.calls[0][0].router.replace).toBe('function');
   });
 
-  it('goBack at the root falls back to the route parent', () => {
-    createApp(platform).renderApp({ initialUrl: '/myBets/42' });
+  it('goBack at the root falls back to the route parent even when onBackAtRoot is set', () => {
+    const onBackAtRoot = vi.fn();
+    createApp(platform).renderApp({ initialUrl: '/myBets/42', onBackAtRoot });
     click('back');
+    expect(onBackAtRoot).not.toHaveBeenCalled();
     expect(visible('screen-mybets')).toBeTruthy();
   });
 

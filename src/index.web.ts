@@ -12,6 +12,7 @@ export {
   useRouteRegistry,
   createTypedRouterHooks,
 } from './hooks';
+export { createRouterRef, getRouter } from './imperative';
 export { Redirect } from './components/Redirect.web';
 export { Link } from './components/Link.web';
 export { RouterView } from './components/RouterView.web';
@@ -21,6 +22,9 @@ export {
   WebRouterProvider,
 } from './adapters/web';
 export type {
+  ControlledLocation,
+  ControlledNavigateAction,
+  ControlledNavigateIntent,
   WebRouterProviderProps as RouterProviderProps,
   WebRouterProviderProps,
 } from './adapters/web';

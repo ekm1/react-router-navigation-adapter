@@ -14,5 +14,25 @@ export {
   useRouter,
 } from './native';
 export { LiteConfig } from './shared';
-export type { LiteConfigValue, LiteGuard, LiteLinkProps, LiteLocation, LiteRouter, LiteTo } from './shared';
-export type { GetUserConfirmation, NavigationGuardCallback, NavigationGuardContext, QueryInput, QueryParams, SetQueryOptions } from '../types';
+export type {
+  LiteConfigValue,
+  LiteGuard,
+  LiteLinkProps,
+  LiteLocation,
+  LiteNavigationAction,
+  LiteNavigationListener,
+  LiteRouter,
+  LiteTo,
+} from './shared';
+export type {
+  GetUserConfirmation,
+  LinkIsActive,
+  LinkLocation,
+  LinkMatch,
+  NavigationGuardCallback,
+  NavigationGuardContext,
+  QueryInput,
+  QueryParams,
+  SetQueryOptions,
+  WebLinkComponentProps,
+} from '../types';

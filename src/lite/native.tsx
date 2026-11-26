@@ -18,7 +18,7 @@ import {
 } from '@react-navigation/native';
 import type { NavigationAction, NavigationContainerRef, ParamListBase } from '@react-navigation/native';
 import { formatRelativeUrl } from '../pathUtils';
-import { mergeQuery, runGuard } from '../shared';
+import { mergeQuery, resolveLinkActive, runGuard } from '../shared';
 import type { GetUserConfirmation, NavigationGuardAction } from '../types';
 import {
   resolveTo,
@@ -27,6 +27,8 @@ import {
   type LiteGuard,
   type LiteLinkProps,
   type LiteLocation,
+  type LiteNavigationAction,
+  type LiteNavigationListener,
   type LiteRouter,
 } from './shared';
 
@@ -75,13 +77,76 @@ function runFocusedGuards(container: object, action: NavigationGuardAction, proc
   return true;
 }
 
-/** The app's own `linking` options (from `<NavigationContainer linking>`). */
+const LITE_HASH_KEY = '__urHash';
+
+function splitUrlHash(url: string): { withoutHash: string; hash: string } {
+  const idx = url.indexOf('#');
+  if (idx === -1) return { withoutHash: url, hash: '' };
+  return { withoutHash: url.slice(0, idx), hash: url.slice(idx + 1) };
+}
+
+function injectLiteHash(state: any, hash: string): any {
+  if (!state || !hash || !Array.isArray(state.routes) || state.routes.length === 0) return state;
+  const idx = typeof state.index === 'number' ? state.index : state.routes.length - 1;
+  const target = state.routes[idx];
+  if (!target) return state;
+  const nextRoute =
+    target.state && Array.isArray(target.state.routes) && target.state.routes.length > 0
+      ? { ...target, state: injectLiteHash(target.state, hash) }
+      : { ...target, params: { ...(target.params ?? {}), [LITE_HASH_KEY]: hash } };
+  const nextRoutes = state.routes.slice();
+  nextRoutes[idx] = nextRoute;
+  return { ...state, routes: nextRoutes };
+}
+
+function extractLiteHash(state: any): { cleanState: any; hash: string } {
+  if (!state || !Array.isArray(state.routes) || state.routes.length === 0) {
+    return { cleanState: state, hash: '' };
+  }
+  const idx = typeof state.index === 'number' ? state.index : state.routes.length - 1;
+  const target = state.routes[idx];
+  if (!target) return { cleanState: state, hash: '' };
+  if (target.state && Array.isArray(target.state.routes) && target.state.routes.length > 0) {
+    const nested = extractLiteHash(target.state);
+    if (!nested.hash) return { cleanState: state, hash: '' };
+    const nextRoutes = state.routes.slice();
+    nextRoutes[idx] = { ...target, state: nested.cleanState };
+    return { cleanState: { ...state, routes: nextRoutes }, hash: nested.hash };
+  }
+  const params = target.params as Record<string, unknown> | undefined;
+  if (!params) return { cleanState: state, hash: '' };
+  if (typeof params[LITE_HASH_KEY] === 'string' && params[LITE_HASH_KEY]) {
+    const hash = params[LITE_HASH_KEY] as string;
+    const nextParams = { ...params };
+    delete nextParams[LITE_HASH_KEY];
+    const nextRoutes = state.routes.slice();
+    nextRoutes[idx] = {
+      ...target,
+      params: Object.keys(nextParams).length > 0 ? nextParams : undefined,
+    };
+    return { cleanState: { ...state, routes: nextRoutes }, hash };
+  }
+  return { cleanState: state, hash: '' };
+}
+
+/** The app's own `linking` options (from `<NavigationContainer linking>`), with `#hash` round-tripping. */
 function useLinkingHelpers() {
   const { options } = useContext(LinkingContext);
   return useMemo(
     () => ({
-      toState: (url: string) => (options?.getStateFromPath ?? getStateFromPath)(url, options?.config as any),
-      toPath: (state: any) => (options?.getPathFromState ?? getPathFromState)(state, options?.config as any),
+      toState: (url: string) => {
+        const { withoutHash, hash } = splitUrlHash(url);
+        const state = (options?.getStateFromPath ?? getStateFromPath)(withoutHash, options?.config as any);
+        return hash ? injectLiteHash(state, hash) : state;
+      },
+      toPath: (state: any) => {
+        const { cleanState, hash } = extractLiteHash(state);
+        const path = (options?.getPathFromState ?? getPathFromState)(cleanState, options?.config as any);
+        if (hash && typeof path === 'string' && !path.includes('#')) {
+          return `${path}#${hash}`;
+        }
+        return path;
+      },
       toAction: (state: any) => (options?.getActionFromState ?? getActionFromState)(state, options?.config as any),
     }),
     [options],
@@ -123,7 +188,8 @@ export function useParams<T extends Record<string, unknown> = Record<string, str
   return useMemo(() => {
     const params: Record<string, unknown> = {};
     for (const [key, value] of Object.entries((route?.params ?? {}) as Record<string, unknown>)) {
-      if (!(key in query) && value !== undefined) params[key] = value;
+      if (key === LITE_HASH_KEY || key in query || value === undefined) continue;
+      params[key] = typeof value === 'string' && value.includes('#') ? value.slice(0, value.indexOf('#')) : value;
     }
     return params as T;
   }, [route, query]);
@@ -146,10 +212,10 @@ export function useRouter(): LiteRouter {
       const url = resolveTo(to, location);
       const state = helpers.toState(url);
       if (!state) {
-        if (!config.openWeb) {
-          throw new Error(`[react-router-navigation-adapter/lite] No screen in the linking config matches "${url}". Pass openWeb to <LiteConfig>.`);
+        const open = config.openWeb ?? config.onExternal;
+        if (!open) {
+          throw new Error(`[react-router-navigation-adapter/lite] No screen in the linking config matches "${url}". Pass openWeb or onExternal to <LiteConfig>.`);
         }
-        const open = config.openWeb;
         return confirmGuards('navigate', url, () => open(url));
       }
       const leaf = findFocusedRoute(state as any) as { name: string; params?: object };
@@ -185,13 +251,34 @@ export function useRouter(): LiteRouter {
       canGoBack,
       goBack: (fallback) => {
         if (canGoBack()) (navigation ?? container).goBack();
-        else if (config.onBackAtRoot) confirmGuards('goBack', undefined, config.onBackAtRoot);
         else if (fallback) router.replace(fallback);
+        else if (config.onBackAtRoot) confirmGuards('goBack', undefined, config.onBackAtRoot);
       },
       setQuery: (query, options) => {
         const next = mergeQuery(location.query, query, options?.merge ?? true);
         const url = formatRelativeUrl(location.pathname, next, location.hash);
         go(url, options?.replace ?? true ? 'replace' : 'push');
+      },
+      openExternal: (url) => {
+        const open = config.onExternal ?? config.openWeb;
+        if (!open) {
+          throw new Error(
+            `[react-router-navigation-adapter/lite] openExternal("${url}") requires onExternal or openWeb on <LiteConfig>.`,
+          );
+        }
+        confirmGuards('navigate', url, () => open(url));
+      },
+      reload: () => {
+        const perform = () => {
+          if (config.onReload) {
+            config.onReload();
+          } else {
+            console.warn(
+              '[react-router-navigation-adapter/lite] reload() has no default on React Native. Pass onReload to <LiteConfig>.',
+            );
+          }
+        };
+        confirmGuards('replace', location.path, perform);
       },
     };
     return router;
@@ -238,24 +325,77 @@ export function useNavigationGuard(when: boolean, messageOrHandler?: LiteGuard):
   });
 }
 
-/** Calls `listener(location)` after every URL change (e.g. analytics). Works outside screens. */
-export function useNavigationListener(listener: (location: LiteLocation) => void): void {
+interface LiteLeafSnapshot {
+  key: string;
+  path: string;
+  siblings: string[];
+  ownerType?: string;
+  historyLength?: number;
+}
+
+function getLiteFocusedLeaf(state: any, path: string): LiteLeafSnapshot | undefined {
+  if (!state || !Array.isArray(state.routes)) return undefined;
+  let current = state;
+  while (current && Array.isArray(current.routes) && current.routes.length > 0) {
+    const idx = typeof current.index === 'number' ? current.index : current.routes.length - 1;
+    const route = current.routes[idx];
+    if (!route) return undefined;
+    if (route.state && Array.isArray(route.state.routes) && route.state.routes.length > 0) {
+      current = route.state;
+      continue;
+    }
+    return {
+      key: route.key,
+      path,
+      siblings: current.routes.map((r: any) => r.key),
+      ownerType: current.type,
+      historyLength: Array.isArray(current.history) ? current.history.length : undefined,
+    };
+  }
+  return undefined;
+}
+
+function inferLiteAction(prev: LiteLeafSnapshot, next: LiteLeafSnapshot): LiteNavigationAction {
+  if (next.key === prev.key) return 'replace';
+  if (next.ownerType === 'tab' && prev.ownerType === 'tab' && next.historyLength !== undefined && prev.historyLength !== undefined) {
+    if (next.historyLength < prev.historyLength) return 'goBack';
+    if (next.historyLength > prev.historyLength) return 'push';
+    return 'replace';
+  }
+  if (prev.siblings.includes(next.key)) return 'goBack';
+  if (next.siblings.includes(prev.key)) return 'push';
+  return 'replace';
+}
+
+/** Calls `listener(location, action)` after every URL change (e.g. analytics, host stack mirroring). Works outside screens. */
+export function useNavigationListener(listener: LiteNavigationListener): void {
   const container = useContainer();
   const { toPath } = useLinkingHelpers();
   const listenerRef = useRef(listener);
   listenerRef.current = listener;
   useEffect(() => {
+    const capture = (): LiteLeafSnapshot | undefined => {
+      if (!container.isReady()) return undefined;
+      const rootState = container.getRootState();
+      if (!rootState) return undefined;
+      return getLiteFocusedLeaf(rootState, toPath(rootState));
+    };
     // Like history.listen, the initial location is not reported: seed it once ready.
-    let last = container.isReady() ? toPath(container.getRootState()) : undefined;
+    let last = capture();
     const unsubscribeReady = container.addListener('ready', () => {
-      last ??= toPath(container.getRootState());
+      last ??= capture();
     });
     const unsubscribeState = container.addListener('state', () => {
-      const path = toPath(container.getRootState());
-      if (last === undefined) last = path;
-      else if (path !== last) {
-        last = path;
-        listenerRef.current(toLiteLocation(path));
+      const next = capture();
+      if (!next) return;
+      if (!last) {
+        last = next;
+        return;
+      }
+      if (next.path !== last.path || next.key !== last.key) {
+        const action = inferLiteAction(last, next);
+        last = next;
+        listenerRef.current(toLiteLocation(next.path), action);
       }
     });
     return () => {
@@ -288,15 +428,59 @@ export function useFocusEffect(effect: () => void | (() => void)): void {
 }
 
 /** `<Pressable accessibilityRole="link">` navigating through the app's linking config. */
-export function Link({ to, replace, push, children, style, testID, accessibilityLabel }: LiteLinkProps) {
+export function Link({
+  to,
+  replace,
+  push,
+  children,
+  style,
+  activeStyle,
+  exact,
+  strict,
+  sensitive,
+  isActive: isActiveProp,
+  disabled,
+  onPress,
+  onClick,
+  testID,
+  accessibilityLabel,
+  className: _className,
+  activeClassName: _activeClassName,
+  component: _component,
+  target: _target,
+  rel: _rel,
+}: LiteLinkProps) {
   const router = useRouter();
+  const location = useLocation();
+  const targetLoc = toLiteLocation(resolveTo(to, location));
+  const active = resolveLinkActive(
+    targetLoc.pathname,
+    { pathname: location.pathname, search: location.search, hash: location.hash },
+    { exact, strict, sensitive, isActive: isActiveProp },
+  );
+  const resolvedStyle =
+    active && activeStyle
+      ? typeof style === 'function'
+        ? (pressable: { pressed: boolean }) => [style(pressable), activeStyle]
+        : [style, activeStyle]
+      : style;
   return (
     <Pressable
       accessibilityRole="link"
       accessibilityLabel={accessibilityLabel}
+      accessibilityState={active ? { selected: true } : undefined}
       testID={testID}
-      style={style}
-      onPress={() => (replace ? router.replace(to) : push ? router.push(to) : router.navigate(to))}
+      style={resolvedStyle}
+      disabled={disabled}
+      onPress={(event) => {
+        if (disabled) return;
+        onPress?.(event);
+        onClick?.(event);
+        if ((event as any)?.defaultPrevented) return;
+        if (replace) router.replace(to);
+        else if (push) router.push(to);
+        else router.navigate(to);
+      }}
     >
       {children}
     </Pressable>

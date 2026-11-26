@@ -1,6 +1,8 @@
 import React, { forwardRef, useCallback } from 'react';
 import { Pressable, type PressableProps } from 'react-native';
-import { useIsActive, useRouter } from '../hooks';
+import { useUniversalRouterContext } from '../context';
+import { useRoute, useRouter } from '../hooks';
+import { resolveLinkActive, resolveTargetFromRoute, toLinkLocation } from '../shared';
 import type { CommonLinkProps } from '../types';
 
 /** Common link props plus any other `<Pressable>` props (`hitSlop`, `onLongPress`, ...). */
@@ -24,17 +26,29 @@ function LinkImpl<TName extends string>({
   onClick,
   activeStyle,
   exact,
-  // Web-only props, accepted so shared screens compile on both platforms.
+  strict,
+  sensitive,
+  isActive: isActiveProp,
+  // Web-only props, accepted so shared screens and design-system wrappers compile on both platforms.
   className: _className,
   activeClassName: _activeClassName,
   target: _target,
   rel: _rel,
+  component: _component,
   ...rest
 }: NativeLinkProps<TName>, ref: React.ForwardedRef<any>) {
   const router = useRouter<TName>();
-  const isActive = useIsActive(to, params, { exact });
+  const currentRoute = useRoute<TName>();
+  const { registry, routeContext } = useUniversalRouterContext();
+  const resolved = resolveTargetFromRoute(registry, currentRoute, to, params, { query, hash }, routeContext);
+  const active = resolveLinkActive(resolved.pathname, toLinkLocation(currentRoute), {
+    exact,
+    strict,
+    sensitive,
+    isActive: isActiveProp,
+  });
   const resolvedStyle =
-    isActive && activeStyle
+    active && activeStyle
       ? typeof style === 'function'
         ? (pressable: { pressed: boolean }) => [style(pressable), activeStyle]
         : [style, activeStyle]
@@ -69,7 +83,7 @@ function LinkImpl<TName extends string>({
       testID={testID}
       style={resolvedStyle}
       accessibilityState={
-        isActive ? { ...rest.accessibilityState, selected: true } : rest.accessibilityState
+        active ? { ...rest.accessibilityState, selected: true } : rest.accessibilityState
       }
       disabled={disabled}
       onPress={handlePress}
@@ -81,7 +95,9 @@ function LinkImpl<TName extends string>({
 
 /**
  * Native `<Link>` rendering a React Native `<Pressable>` with `accessibilityRole="link"`,
- * backed by React Navigation. Forwards its ref and other Pressable props.
+ * backed by React Navigation. Supports `NavLink` active-state props (`activeStyle`, `exact`,
+ * `strict`, `sensitive`, `isActive`) and accepts web-only props (`component`, `activeClassName`)
+ * so shared wrappers compile unchanged on both platforms.
  */
 export const Link = forwardRef(LinkImpl) as <TName extends string = string>(
   props: NativeLinkProps<TName> & { ref?: React.Ref<any> },

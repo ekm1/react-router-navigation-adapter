@@ -29,19 +29,22 @@ export const routes = defineRoutes({
 
 | Option | Meaning |
 | --- | --- |
-| `path` | `/static`, `/:param`, `/:param?` and a trailing `/*`. Other syntax (`:id(\d+)`, `:a-:b`) throws, because React Router and React Navigation would match it differently. |
+| `path` | A pattern string or array of patterns (`['/items', '/items/:id']`, `['/projects/:id', '/projects/:id/details']`). Supports `/static`, `/:param`, `/:param?` and a trailing `/*`. Other syntax (`:id(\d+)`, `:a-:b`) throws, because React Router and React Navigation would match it differently. `buildUrl` and navigate-by-name pick the first satisfied pattern consuming the most provided params; URL navigation, `initialUrl`, `createLinking`, and `toLinkingConfig` (via React Navigation 7 `alias`) handle all aliases. |
 | `native` | Native only: the route has a screen. Without it, navigation goes to `openWeb(url)`. |
 | `nestedIn` | Native only: route names of the navigators the screen is nested in, outermost first (e.g. `['Tabs', 'BetsTab']`). See [Nested navigators](#nested-navigators). |
-| `parent` | Where `goBack()` goes when there is no history (deep link), unless `onBackAtRoot` handles it. A target or `(route) => target`. |
+| `parent` | Where `goBack()` goes when there is no history (deep link). Takes precedence over `onBackAtRoot` so a deep-linked child walks back to its parent first, and only a root route without `parent` hands back to `onBackAtRoot`. A target or `(route) => target`. |
 | `parse` / `stringify` | Convert path params (e.g. `parse: { id: Number }`). |
 | `exact`, `strict`, `sensitive`, `options` | As in React Router / React Navigation screen options. With `exact: false`, `/bets` matching `/bets/123` keeps the full URL. |
+| `overlay`, `overlayPresentation` | Marks a route whose `path` matches as a segment-aligned suffix under any prefix (replacing leading wildcards like `*/preview/:previewId`). On web, the underlying base route keeps rendering with its own `useRoute()` / `useParams()` and `useIsFocused() === false` while the overlay renders on top. On native, it pushes as a modal screen (`overlayPresentation` defaults to `'transparentModal'`). Navigating by name appends the overlay suffix to the current base pathname; `goBack()` closes the overlay. |
+| `enabled` | `boolean \| ((context) => boolean)` evaluated at match time (receives `<RouterProvider routeContext={...}>`). Disabled routes are skipped during matching; on native, screens remain registered in the navigator for stack stability and render `<RouterView fallback>` (or `null`) if disabled while mounted. Passing a new `routes` registry to `<RouterProvider>` is also safe without remounting history/container state. |
+| `guard` | Route-level entry guard `(route, context?) => true \| void \| NavigationTarget \| ReactElement`. Return `true`/`undefined` to allow, a `NavigationTarget` to redirect (chaining up to 10 hops), or a `ReactElement` to render an alternative view in place at the same URL (e.g. a login prompt or loading state). Behaves identically for `navigate`/`push`/`replace`, `initialUrl`/deep links, back/forward, `reset`, and reactive `routeContext` changes on both platforms. Leave guards on the current screen run first. |
 
 Matching is first-match in declaration order, like React Router's `<Switch>`: declare
 `/myBets/settled` before `/myBets/:id`. `defineRoutes` warns when a static route is unreachable.
 
 ## Mount it
 
-**Web.** Inside an existing React Router v5 `<Router>` (e.g. the MFE's history), it attaches to it.
+**Web.** Inside an existing React Router v5 `<Router>` (e.g. a host app's `BrowserRouter`, `MemoryRouter`, or `StaticRouter`), it detects and attaches to it using public `react-router-dom` hooks (no internal `__RouterContext` import).
 Otherwise it mounts a `<BrowserRouter>` (or `routerType="hash" | "memory"`, or `history={...}`).
 
 ```tsx
@@ -49,6 +52,27 @@ Otherwise it mounts a `<BrowserRouter>` (or `routerType="hash" | "memory"`, or `
   <RouterView fallback={NotFound} />
 </RouterProvider>
 ```
+
+**Controlled web mode (embedded micro-frontend).** When a host owns the address bar (with any router),
+pass `location` (string path or `{ pathname, search, hash, state }`), optional `locationState`,
+`onNavigate({ path, action: 'push' | 'replace' | 'back', state, delta })`, and optional `canGoBack`:
+
+```tsx
+<RouterProvider
+  routes={routes}
+  location={hostUrl}
+  locationState={hostState}
+  canGoBack={hostCanGoBack}
+  onNavigate={(intent) => host.handleIntent(intent)}
+>
+  <RouterView />
+</RouterProvider>
+```
+
+In controlled mode the adapter never reads or writes `window.history`, renders strictly from `location`,
+never echoes host-driven location changes back to `onNavigate`, round-trips `state`, and runs leave/entry guards before emitting intents.
+Pass `onExternal={(url) => ...}` (supported on both web and native, alongside native's `openWeb`) to route
+outgoing navigation to unregistered URLs (e.g. host-owned pages) or external origins through a callback instead of rendering `<RouterView fallback>`.
 
 **Native.**
 
@@ -69,7 +93,7 @@ const Stack = createNativeStackNavigator();
 | --- | --- |
 | `initialUrl` | Opens at a path (also `myapp://myBets/42` style URLs). Query and hash are parsed the same way as on web. A non-native URL calls `openWeb`. In a reused host container, the provider navigates to it once the screen's navigator is mounted. |
 | `openWeb(url)` | Receives every target that is not a `native: true` route with a mounted screen, including unregistered URLs. Without it, such navigation throws. |
-| `onBackAtRoot({ route, router })` | `goBack()` and Android hardware back when nothing can go back. Defaults to the route's `parent`. Web has the same prop. |
+| `onBackAtRoot({ route, router })` | `goBack()` and Android hardware back when nothing can go back and the current route has no `parent`. Web has the same prop. |
 | `getUserConfirmation(message, cb)` | Confirmation for string guards. Default: `Alert.alert` (Cancel/Leave). Web default: `window.confirm`. |
 | `linkingPrefixes` | Enables a generated `linking` config (`createLinking(routes, prefixes, openWeb)` is exported for custom containers). |
 | `independent` | Wraps its container in `NavigationIndependentTree`. |
@@ -126,8 +150,8 @@ router.navigate('/myBets/2?type=million'); // or a URL, or { name, params, query
 | `navigate(target)` | Adds a history entry (web `history.push`, native stack `push`). The current location is updated in place instead. Ticket 1 → ticket 2 → back returns to ticket 1 on both. |
 | `push(target)` | Always adds an entry. |
 | `replace(target)` | Replaces the entry. The same route is updated in place (the screen stays mounted). |
-| `goBack()` / `canGoBack()` | With no history: `onBackAtRoot` (guarded), else `parent`. |
-| `go(-n)` / `getLength()` | Back n entries in one guarded action (native `StackActions.pop(n)`). Going further back than the history allows calls `onBackAtRoot` (else `parent`) on both platforms. |
+| `goBack()` / `canGoBack()` | With no history: `parent` first, else `onBackAtRoot` (guarded). |
+| `go(-n)` / `getLength()` | Back n entries in one guarded action (native `StackActions.pop(n)`). Going further back than the history allows replaces with `parent` first, else calls `onBackAtRoot` on both platforms. |
 | `setQuery(query, { merge = true, replace = true })` | `null` deletes a key. |
 | `reset(targets, index?)` | Replaces the history with `targets` up to `index` (default: the last). `index` counts positions in `targets` on both platforms. On native, entries without a native screen are left out of the stack; when the indexed entry is one, the stack is reset to the native entries before it and the entry opens through `openWeb`. |
 | `setParams`, `buildUrl(target)` | |
@@ -136,10 +160,29 @@ router.navigate('/myBets/2?type=million'); // or a URL, or { name, params, query
 | `useNavigationListener((route, action) => ...)` | Like `history.listen` (analytics). Works outside screens. |
 | `useIsActive(target, params?, { exact })` | `NavLink`-style active state. |
 | `useIsFocused()`, `useFocusEffect()` | |
-| `<Link>` | Web `<a href>` (basename-aware, modifier clicks). Native `<Pressable accessibilityRole="link">`. Accepts `activeClassName` (web), `activeStyle` and `exact`. Forwards its ref and other `<a>` / `Pressable` props. |
+| `<Link>` | Web `<a href>` (or custom `component={Custom}` receiving `{ href, navigate, onClick, ...props }`, basename-aware, modifier clicks). Native `<Pressable accessibilityRole="link">` (accepts & ignores `component` so shared design-system wrappers compile unchanged on both platforms). Supports React Router v5 `NavLink` props: `activeClassName` (web), `activeStyle`, `exact`, `strict`, `sensitive`, and `isActive(match, location)` on both platforms. Forwards its ref and other `<a>` / `Pressable` props. |
 | `<Prompt when message>` | React Router v5's `<Prompt>` API on the guard above (message string, or `(location, action) => string \| boolean`). |
 | `<Redirect>` | On web it is React Router's own `<Redirect>`, so it works with `StaticRouter` (SSR) and redirects in the first commit. |
 | `<RouterView>` | |
+| `openExternal(url, { replace? })` | Guarded cross-platform external navigation (also available in `/lite`). Web: calls `onExternal(url)` if set, else `window.location.assign(url)` (or `replace(url)`). Native: calls `onExternal` / `openWeb` (throws if neither is set). |
+| `reload()` | Guarded reload (also available in `/lite`). Web: calls `onReload()` if set, else `window.location.reload()`. Native: calls `onReload()` if set, else logs a warning and no-ops. |
+
+### Imperative access outside React
+
+Non-React code (middleware, store effects, URL utilities) cannot read `window.location` on React Native. Use `getRouter()` (active mounted provider) or an explicit `routerRef = createRouterRef()` passed to `<RouterProvider routerRef={routerRef}>`:
+
+```ts
+import { createRouterRef, getRouter } from 'react-router-navigation-adapter';
+
+export const routerRef = createRouterRef();
+// <RouterProvider routes={routes} routerRef={routerRef} onExternal={...} onReload={...}>
+
+const loc = getRouter().getLocation(); // { pathname, search, hash, query, path, state, key }
+const unsub = getRouter().subscribe((nextLoc, action) => { /* ... */ });
+getRouter().navigate('/items/42');
+getRouter().openExternal('https://docs.example.org');
+getRouter().reload();
+```
 
 ### React Router v5 call sites
 
@@ -203,12 +246,12 @@ Optionally, the app wraps its tree in `<LiteConfig>` (from the same entry):
 | API | Both platforms |
 | --- | --- |
 | `useRouter()` | `navigate(to)` adds an entry (web `history.push`, native stack `push`), and navigating to the current URL updates it in place. `push(to)` always adds one. `replace(to)` replaces it; the same screen is updated in place. Also `goBack(fallback?)`, `canGoBack()`, `setQuery(query, { merge = true, replace = true })` and `location`. `to` is a URL (`'/myBets/42?type=million'`, `'?type=acca'`, `'#legs'`) or `{ pathname?, query?, hash? }`. |
-| `goBack(fallback?)` with no history | `<LiteConfig onBackAtRoot>` (guarded), else `replace(fallback)` when given. |
+| `goBack(fallback?)` with no history | `replace(fallback)` when given, else `<LiteConfig onBackAtRoot>` (guarded). |
 | `useLocation()`, `useQuery()` | `{ pathname, search, hash, query, path }`. |
 | `useParams()` | Path params: React Router's `useParams()` on web; on native, the route params that are not query params. Strings, unless the native linking config `parse`s them. |
 | `useNavigationGuard(when, message \| handler)` | Blocks leaving the current pathname (query-only changes pass): back, pushes, replaces, `goBack()` at the root and native `openWeb`. Native uses `usePreventRemove`, so native-stack also blocks the iOS swipe-back; use it inside a screen. Web shares one `history.block` among all guards on a history. |
-| `useNavigationListener((location) => ...)` | Every URL change, not the initial one, like `history.listen`. |
-| `<Link to>` | React Router's `<Link>` on web (real `<a href>`); `<Pressable accessibilityRole="link">` on native. |
+| `useNavigationListener((location, action) => ...)` | Every URL change, not the initial one, with `action: 'push' \| 'replace' \| 'goBack'` so hosts can mirror the stack. |
+| `<Link to>` | React Router's `<Link>` on web (real `<a href>` or custom `component`); `<Pressable accessibilityRole="link">` on native. Supports `activeClassName` (web), `activeStyle`, `exact`, `strict`, `sensitive`, and `isActive(match, location)` on both platforms. |
 | `useIsFocused()`, `useFocusEffect()` | |
 
 On native, a URL the linking config does not match goes to `<LiteConfig openWeb>` (without it,
@@ -234,14 +277,31 @@ What the compact layer leaves out, compared with the full layer:
 - **`reset()` on web** cannot delete browser history, so the browser back button can still reach entries from before the reset. `canGoBack()` does account for the reset.
 - **Nested deep links** need `nestedIn` and assume the outermost `<RouterView>` navigator is the root of the container (`initialUrl` in a reused host container navigates instead).
 - **`state`** is stored in route params on native, so keep it serializable.
-- **Hashes** from a custom linking config stay attached to the last query value (React Navigation does not split them). `initialUrl` and `createLinking` handle hashes.
+- **Hashes on native** round-trip identically to web across `initialUrl`, `createLinking`, custom `linking` configs (automatically wrapped by `withHashLinking`, also exported for host containers), `initialState` built from stock `getStateFromPath`, and `/lite`.
+
+## Preact compatibility
+
+The web layer works under `preact/compat` when `react`, `react-dom`, `react/jsx-runtime`, and `react/jsx-dev-runtime` are aliased to `preact/compat` (and `react-router` / `react-router-dom` resolve their ESM builds through the alias). Because the adapter uses only public `react-router-dom` hooks (no `__RouterContext` internal import), `RouterProvider` (uncontrolled and controlled), `RouterView`, overlays, `Link`, leave/entry guards, `<Prompt>`, `<Redirect>`, imperative `getRouter()`, and compat hooks run unmodified on Preact.
+
+## Migration codemod
+
+To migrate an existing React Router v5 codebase, run the included TypeScript AST codemod:
+
+```bash
+npm run codemod -- src/                 # dry-run + audit report
+npm run codemod -- src/ --write         # rewrite imports in place + audit report
+npm run codemod -- src/ --report-only --json
+```
+
+It rewrites imports of `useHistory`, `useLocation`, `useParams`, `useRouteMatch`, `withRouter`, `matchPath`, `generatePath`, `Link`, `Redirect`, `Prompt`, and `RouteComponentProps` from both `'react-router'` and `'react-router-dom'` to `'react-router-navigation-adapter'` (configurable via `--package`), preserving aliases, `type` modifiers, and unrelated imports, and merging into existing adapter imports. It also prints an audit report (with file:line:col and hints) flagging `path` arrays, non-trailing wildcards (`*/...`), `<Route render>` / function-child `<Route>`, `<NavLink isActive>`, and direct `window.location` / `window.history` usages.
 
 ## Development
 
 ```bash
-npm ci        # .npmrc sets legacy-peer-deps (react-native is mocked in tests)
+npm ci            # .npmrc sets legacy-peer-deps (react-native is mocked in tests)
 npm run typecheck
 npm test
+npm run test:preact
 npm run build
 ```
 

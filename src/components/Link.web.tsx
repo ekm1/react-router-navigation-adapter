@@ -1,7 +1,9 @@
 import React, { forwardRef, useCallback } from 'react';
 import { useHistory } from 'react-router-dom';
-import { useIsActive, useRouteRegistry, useRouter } from '../hooks';
+import { useUniversalRouterContext } from '../context';
+import { useRoute, useRouter } from '../hooks';
 import { normalizeHash, stringifyQueryParams } from '../pathUtils';
+import { resolveLinkActive, resolveTargetFromRoute, toLinkLocation } from '../shared';
 import type { CommonLinkProps } from '../types';
 
 /** Common link props plus any other `<a>` attributes (`id`, `title`, `aria-*`; `data-*` also pass through). */
@@ -34,20 +36,39 @@ function LinkImpl<TName extends string>(
     activeClassName,
     activeStyle,
     exact,
+    strict,
+    sensitive,
+    isActive: isActiveProp,
+    component: CustomComponent,
     ...rest
   }: WebLinkProps<TName>,
-  ref: React.ForwardedRef<HTMLAnchorElement>,
+  ref: React.ForwardedRef<any>,
 ) {
   const router = useRouter<TName>();
+  const currentRoute = useRoute<TName>();
+  const { registry, routeContext } = useUniversalRouterContext();
   const history = useHistory();
-  const resolved = useRouteRegistry<TName>().resolveTarget(to, params, { query, hash });
+  const resolved = resolveTargetFromRoute(registry, currentRoute, to, params, { query, hash }, routeContext);
   // createHref applies the router's basename, so new-tab/copy-link URLs are correct.
   const href = history.createHref({
     pathname: resolved.pathname,
     search: stringifyQueryParams(resolved.query),
     hash: resolved.hash ? `#${normalizeHash(resolved.hash)}` : '',
   });
-  const isActive = useIsActive(to, params, { exact });
+  const active = resolveLinkActive(resolved.pathname, toLinkLocation(currentRoute), {
+    exact,
+    strict,
+    sensitive,
+    isActive: isActiveProp,
+  });
+
+  const navigate = useCallback(() => {
+    if (disabled) return;
+    const options = { query, hash, state };
+    if (replace) router.replace(to, params, options);
+    else if (push) router.push(to, params, options);
+    else router.navigate(to, params, options);
+  }, [disabled, query, hash, state, replace, push, router, to, params]);
 
   const handleClick = useCallback(
     (event: React.MouseEvent<HTMLAnchorElement>) => {
@@ -64,23 +85,45 @@ function LinkImpl<TName extends string>(
         !isModifiedEvent(event)
       ) {
         event.preventDefault();
-        const options = { query, hash, state };
-        if (replace) router.replace(to, params, options);
-        else if (push) router.push(to, params, options);
-        else router.navigate(to, params, options);
+        navigate();
       }
     },
-    [disabled, onClick, onPress, target, query, hash, state, replace, push, router, to, params],
+    [disabled, onClick, onPress, target, navigate],
   );
+
+  const resolvedClassName = [className, active && activeClassName].filter(Boolean).join(' ') || undefined;
+  const resolvedStyle = active && activeStyle ? { ...style, ...activeStyle } : style;
+
+  if (CustomComponent) {
+    return (
+      <CustomComponent
+        {...rest}
+        ref={ref}
+        href={disabled ? undefined : href}
+        navigate={navigate}
+        className={resolvedClassName}
+        style={resolvedStyle}
+        aria-current={active ? 'page' : rest['aria-current']}
+        data-testid={testID}
+        aria-label={accessibilityLabel ?? rest['aria-label']}
+        aria-disabled={disabled || undefined}
+        target={target}
+        rel={rel}
+        onClick={onClick}
+      >
+        {children}
+      </CustomComponent>
+    );
+  }
 
   return (
     <a
       {...rest}
       ref={ref}
       href={disabled ? undefined : href}
-      className={[className, isActive && activeClassName].filter(Boolean).join(' ') || undefined}
-      style={isActive && activeStyle ? { ...style, ...activeStyle } : style}
-      aria-current={isActive ? 'page' : rest['aria-current']}
+      className={resolvedClassName}
+      style={resolvedStyle}
+      aria-current={active ? 'page' : rest['aria-current']}
       data-testid={testID}
       aria-label={accessibilityLabel ?? rest['aria-label']}
       aria-disabled={disabled || undefined}
@@ -94,10 +137,11 @@ function LinkImpl<TName extends string>(
 }
 
 /**
- * Web `<Link>` rendering a semantic `<a href>` backed by React Router v5. Preserves browser
- * behavior for modifier clicks (Cmd/Ctrl-click), right-click and `target="_blank"`.
- * Forwards its ref to the `<a>` and passes other anchor attributes through.
+ * Web `<Link>` rendering a semantic `<a href>` (or custom `component`) backed by React Router v5.
+ * Preserves browser behavior for modifier clicks (Cmd/Ctrl-click), right-click and `target="_blank"`.
+ * Supports React Router v5 `NavLink` active-state props (`activeClassName`, `activeStyle`, `exact`,
+ * `strict`, `sensitive`, `isActive`) and forwards its ref and other anchor attributes through.
  */
 export const Link = forwardRef(LinkImpl) as <TName extends string = string>(
-  props: WebLinkProps<TName> & { ref?: React.Ref<HTMLAnchorElement> },
+  props: WebLinkProps<TName> & { ref?: React.Ref<any> },
 ) => React.ReactElement | null;

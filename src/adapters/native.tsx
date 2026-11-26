@@ -17,6 +17,8 @@ import {
   NavigationRouteContext,
   StackActions,
   createNavigationContainerRef,
+  getPathFromState,
+  getStateFromPath,
   useFocusEffect as useRNFocusEffect,
   useIsFocused as useRNIsFocused,
   usePreventRemove,
@@ -31,12 +33,27 @@ import type {
   Route as RNRoute,
 } from '@react-navigation/native';
 import { UniversalRouterContext } from '../context';
-import { formatRelativeUrl, normalizeHash } from '../pathUtils';
-import { backAtRoot, mergeQuery, resolveParamsUpdate, runGuard } from '../shared';
+import {
+  formatRelativeUrl,
+  generatePathFromPattern,
+  joinBaseAndOverlay,
+  normalizeHash,
+  normalizePathname,
+} from '../pathUtils';
+import {
+  backAtRoot,
+  mergeQuery,
+  resolveEntryGuardChain,
+  resolveParamsUpdate,
+  resolveTargetFromRoute,
+  runGuard,
+} from '../shared';
+import { registerImperativeRouter, toImperativeLocation } from '../imperative';
 import type {
   BackAtRootContext,
   GetUserConfirmation,
   HistoryAction,
+  ImperativeRouter,
   NavigationGuardAction,
   NavigationGuardCallback,
   NavigationListener,
@@ -48,6 +65,7 @@ import type {
   RouteRegistry,
   RouterAdapter,
   RouterController,
+  RouterHandle,
   UnifiedRoute,
 } from '../types';
 
@@ -64,6 +82,10 @@ interface NativeRouteMeta {
   state?: unknown;
   /** Full pathname for non-exact routes. */
   pathname?: string;
+  /** Matched alias pattern for multi-path routes. */
+  pattern?: string;
+  /** Base pathname beneath an `overlay: true` route. */
+  basePathname?: string;
 }
 
 export interface NativeRouterProviderProps<TName extends string = string> {
@@ -80,10 +102,17 @@ export interface NativeRouterProviderProps<TName extends string = string> {
   /** Custom React Navigation `linking` config (overrides the generated one). See `createLinking`. */
   linking?: ContainerProps['linking'];
   /**
-   * WebView boundary: called with the URL of any target that is not a `native: true` route
-   * with a mounted screen (unregistered URLs included). Without it such navigation throws.
+   * WebView / external boundary: called with the URL of any target that is not a `native: true`
+   * route with a mounted screen (unregistered URLs included). Without `openWeb` or `onExternal`,
+   * such navigation throws.
    */
   openWeb?: (url: string) => void;
+  /** Cross-platform alias for `openWeb` (also used by `router.openExternal(url)`). */
+  onExternal?: (url: string) => void;
+  /** Optional handler invoked by `router.reload()`. Without it, `reload()` warns and no-ops on React Native. */
+  onReload?: () => void;
+  /** Optional explicit ref populated with the provider's imperative router handle (`createRouterRef()`). */
+  routerRef?: RouterHandle<any>;
   /** Called by `goBack()` when there is nothing to go back to (e.g. close the host). Defaults to the route's `parent`. */
   onBackAtRoot?: (ctx: BackAtRootContext) => void;
   /** Confirmation for string guard prompts. Defaults to `Alert.alert` with Cancel/Leave buttons. */
@@ -101,6 +130,8 @@ export interface NativeRouterProviderProps<TName extends string = string> {
    * Defaults to true when one exists and `independent` is not set.
    */
   useExistingContainer?: boolean;
+  /** Optional reactive context passed to route `enabled(context)` predicates and entry `guard(route, context)` hooks. */
+  routeContext?: unknown;
 }
 
 interface Snapshot {
@@ -114,6 +145,7 @@ interface NativeInternal {
   subscribeSnapshot: (onChange: () => void) => () => void;
   subscribe: (listener: NavigationListener) => () => void;
   openWeb?: (url: string) => void;
+  onReload?: () => void;
   onBackAtRoot?: (ctx: BackAtRootContext) => void;
   confirm: GetUserConfirmation;
   /** Register a guard; `routeKey` is the screen it is mounted in (null: outside screens). */
@@ -128,11 +160,18 @@ interface NativeInternal {
     options?: { nextPath?: string; include?: string[]; exclude?: string[] },
   ) => boolean;
   hasGuards: () => boolean;
+  withBypass: (fn: () => void) => void;
 }
 
 type GuardHandlerRef = React.MutableRefObject<string | NavigationGuardCallback | undefined>;
 
 const NativeInternalContext = createContext<NativeInternal | null>(null);
+
+/** Internal hook allowing `<RouterView>` entry-guard redirects to bypass leave guards. */
+export function useNativeBypass(): (fn: () => void) => void {
+  const ctx = useContext(NativeInternalContext);
+  return (fn: () => void) => (ctx ? ctx.withBypass(fn) : fn());
+}
 
 const noSubscription = () => () => {};
 
@@ -196,7 +235,7 @@ function extractNextPath(action: NavigationAction, registry: RouteRegistry<any>)
 /** Focused leaf route plus the keys of its navigator's routes. */
 function getFocusedLeaf(
   state: AnyState | undefined,
-): { route: RNRoute<string>; siblings: string[] } | undefined {
+): { route: RNRoute<string>; siblings: string[]; ownerType?: string; historyLength?: number } | undefined {
   if (!state?.routes?.length) return undefined;
   const route = state.routes[state.index ?? state.routes.length - 1] as RNRoute<string> & {
     state?: AnyState;
@@ -206,6 +245,8 @@ function getFocusedLeaf(
     getFocusedLeaf(route.state) ?? {
       route,
       siblings: state.routes.map((r) => r.key ?? ''),
+      ownerType: (state as any).type,
+      historyLength: Array.isArray((state as any).history) ? (state as any).history.length : undefined,
     }
   );
 }
@@ -327,14 +368,25 @@ function planNavigation(root: NavigationState | undefined, registry: RouteRegist
 
 function packParams(
   registry: RouteRegistry<any>,
-  resolved: Pick<ResolvedNavigationIntent, 'name' | 'params' | 'query' | 'hash' | 'state' | 'pathname'>,
+  resolved: Pick<
+    ResolvedNavigationIntent,
+    'name' | 'params' | 'query' | 'hash' | 'state' | 'pathname' | 'matchedPattern' | 'basePathname'
+  >,
 ) {
   const meta: NativeRouteMeta = {};
   if (Object.keys(resolved.query).length > 0) meta.query = resolved.query;
   if (resolved.hash) meta.hash = resolved.hash;
   if (resolved.state !== undefined) meta.state = resolved.state;
+  const def = resolved.name ? registry.getRoute(resolved.name) : undefined;
   // Non-exact routes keep the full URL pathname (e.g. '/bets/123' matched by '/bets').
-  if (resolved.name && registry.getRoute(resolved.name)?.exact === false) meta.pathname = resolved.pathname;
+  if (def?.exact === false) meta.pathname = resolved.pathname;
+  // Multi-path routes keep which alias pattern matched (e.g. '/projects/:id/details').
+  if (def && resolved.matchedPattern && resolved.matchedPattern !== def.path) {
+    meta.pattern = resolved.matchedPattern;
+  }
+  if (def?.overlay && resolved.basePathname) {
+    meta.basePathname = resolved.basePathname;
+  }
   return Object.keys(meta).length > 0 ? { ...resolved.params, [META_KEY]: meta } : { ...resolved.params };
 }
 
@@ -356,26 +408,79 @@ export function unpackNativeRoute<TName extends string>(
 
   const params: RouteParams = {};
   const flatQuery: QueryParams = {};
+  const rawPathParamOrder: string[] = [];
   for (const [key, value] of Object.entries(raw)) {
     if (key === META_KEY || value === undefined) continue;
     if (definition && !pathParamNames.includes(key)) {
       flatQuery[key] = Array.isArray(value) ? value.map(String) : String(value);
     } else {
+      rawPathParamOrder.push(key);
       const parse = definition?.parse?.[key];
       params[key] = typeof value === 'string' && parse ? parse(value) : value;
     }
   }
 
+  let fallbackHash = '';
+  if (!meta.hash) {
+    const flatKeys = Object.keys(flatQuery);
+    if (flatKeys.length > 0) {
+      const lastKey = flatKeys[flatKeys.length - 1];
+      const lastVal = flatQuery[lastKey];
+      if (typeof lastVal === 'string') {
+        const hashIdx = lastVal.indexOf('#');
+        if (hashIdx !== -1) {
+          fallbackHash = lastVal.slice(hashIdx + 1);
+          flatQuery[lastKey] = lastVal.slice(0, hashIdx);
+        }
+      } else if (Array.isArray(lastVal) && lastVal.length > 0) {
+        const tail = lastVal[lastVal.length - 1];
+        const hashIdx = tail.indexOf('#');
+        if (hashIdx !== -1) {
+          fallbackHash = tail.slice(hashIdx + 1);
+          flatQuery[lastKey] = [...lastVal.slice(0, -1), tail.slice(0, hashIdx)];
+        }
+      }
+    } else if (rawPathParamOrder.length > 0) {
+      const lastKey = rawPathParamOrder[rawPathParamOrder.length - 1];
+      const rawVal = raw[lastKey];
+      if (typeof rawVal === 'string') {
+        const hashIdx = rawVal.indexOf('#');
+        if (hashIdx !== -1) {
+          fallbackHash = rawVal.slice(hashIdx + 1);
+          const cleaned = rawVal.slice(0, hashIdx);
+          const parse = definition?.parse?.[lastKey];
+          params[lastKey] = parse ? parse(cleaned) : cleaned;
+        }
+      }
+    }
+  }
+
   const query = { ...meta.query, ...flatQuery };
-  const hash = normalizeHash(meta.hash);
+  const hash = normalizeHash(meta.hash ?? fallbackHash);
   let pathname = `/${rnRoute.name}`;
+  let matchedPattern: string | null = definition ? definition.path : null;
   if (meta.pathname) {
     pathname = meta.pathname;
+    matchedPattern = meta.pattern ?? matchedPattern;
   } else if (definition) {
-    try {
-      pathname = registry.buildPath(definition.name, params);
-    } catch {
-      pathname = definition.path; // required params not set yet
+    if (meta.pattern && definition.paths.includes(meta.pattern)) {
+      try {
+        pathname = generatePathFromPattern(meta.pattern, params, definition.stringify);
+        matchedPattern = meta.pattern;
+      } catch {
+        pathname = meta.pattern;
+        matchedPattern = meta.pattern;
+      }
+    } else {
+      try {
+        pathname = registry.buildPath(definition.name, params);
+        matchedPattern = registry.matchUrl(pathname)?.pattern ?? definition.path;
+      } catch {
+        pathname = definition.path; // required params not set yet
+      }
+    }
+    if (definition.overlay) {
+      pathname = joinBaseAndOverlay(meta.basePathname ?? '/', pathname);
     }
   }
   return {
@@ -387,23 +492,160 @@ export function unpackNativeRoute<TName extends string>(
     hash,
     state: meta.state,
     key: rnRoute.key,
-    matchedPattern: definition ? definition.path : null,
+    matchedPattern,
+    ...(definition?.overlay ? { isOverlay: true, basePathname: meta.basePathname ?? '/' } : {}),
   };
 }
 
 /**
  * React Navigation state for a URL, or undefined when it is not a native route.
  * Screens with `nestedIn` get nested navigator state; the outermost name is a screen of the
- * root `<RouterView>` navigator.
+ * root `<RouterView>` navigator. Overlay URLs build `[BaseScreen, OverlayScreen]` so the
+ * underlying screen stays mounted and `goBack()` closes the overlay.
  */
+function stateFromResolvedIntent(
+  registry: RouteRegistry<any>,
+  resolved: ResolvedNavigationIntent<any>,
+  routeContext?: unknown,
+): PartialState<NavigationState> | undefined {
+  const definition = resolved.name ? registry.getRoute(resolved.name) : undefined;
+  if (!definition?.native || !registry.isRouteEnabled(definition.name, routeContext)) return undefined;
+  return nestState(definition.nestedIn ?? [], [{ name: resolved.name!, params: packParams(registry, resolved) }], 0);
+}
+
 export function getStateFromUrl(
   registry: RouteRegistry<any>,
   url: string,
+  routeContext?: unknown,
 ): PartialState<NavigationState> | undefined {
-  const resolved = registry.resolveTarget(/^\/|:\/\//.test(url) ? url : `/${url}`);
-  const definition = resolved.name ? registry.getRoute(resolved.name) : undefined;
-  if (!definition?.native) return undefined;
-  return nestState(definition.nestedIn ?? [], [{ name: resolved.name!, params: packParams(registry, resolved) }], 0);
+  const normalizedUrl = /^\/|:\/\//.test(url) ? url : `/${url}`;
+  const overlayMatch = registry.matchOverlayUrl(normalizedUrl, routeContext);
+  if (overlayMatch) {
+    const overlayDef = registry.getRoute(overlayMatch.overlay.name);
+    if (!overlayDef?.native || !registry.isRouteEnabled(overlayDef.name, routeContext)) return undefined;
+    const resolvedOverlay = registry.resolveTarget(normalizedUrl, undefined, undefined, routeContext);
+    const overlayGuard = resolveEntryGuardChain(registry, resolvedOverlay, routeContext);
+    if (overlayGuard.kind === 'redirect') {
+      return stateFromResolvedIntent(registry, overlayGuard.intent, routeContext);
+    }
+    const overlayScreen = { name: overlayDef.name, params: packParams(registry, resolvedOverlay) };
+    const overlayNested = overlayDef.nestedIn ?? [];
+
+    if (overlayMatch.base) {
+      const baseDef = registry.getRoute(overlayMatch.base.name);
+      if (baseDef?.native && registry.isRouteEnabled(baseDef.name, routeContext)) {
+        const resolvedBase = registry.resolveTarget(overlayMatch.basePathname, undefined, undefined, routeContext);
+        const baseScreen = { name: baseDef.name, params: packParams(registry, resolvedBase) };
+        const baseNested = baseDef.nestedIn ?? [];
+        if (baseNested.join('/') === overlayNested.join('/')) {
+          return nestState(overlayNested, [baseScreen, overlayScreen], 1);
+        }
+        if (overlayNested.length === 0) {
+          const nestedBase = nestState(baseNested, [baseScreen], 0).routes[0];
+          return { index: 1, routes: [nestedBase, overlayScreen] };
+        }
+      }
+    }
+    return nestState(overlayNested, [overlayScreen], 0);
+  }
+
+  const resolved = registry.resolveTarget(normalizedUrl, undefined, undefined, routeContext);
+  const guardEval = resolveEntryGuardChain(registry, resolved, routeContext);
+  const effective = guardEval.kind === 'redirect' ? guardEval.intent : resolved;
+  return stateFromResolvedIntent(registry, effective, routeContext);
+}
+
+const HASH_LINKING_MARKER = Symbol('urHashLinking');
+
+function injectMetaHashIntoState(state: any, hash: string): any {
+  if (!state || !hash || !Array.isArray(state.routes) || state.routes.length === 0) return state;
+  const idx = typeof state.index === 'number' ? state.index : state.routes.length - 1;
+  const target = state.routes[idx];
+  if (!target) return state;
+  const nextRoute =
+    target.state && Array.isArray(target.state.routes) && target.state.routes.length > 0
+      ? { ...target, state: injectMetaHashIntoState(target.state, hash) }
+      : {
+          ...target,
+          params: {
+            ...(target.params ?? {}),
+            [META_KEY]: {
+              ...((target.params?.[META_KEY] ?? {}) as NativeRouteMeta),
+              hash,
+            },
+          },
+        };
+  const nextRoutes = state.routes.slice();
+  nextRoutes[idx] = nextRoute;
+  return { ...state, routes: nextRoutes };
+}
+
+function stripMetaAndExtractHash(state: any): { cleanState: any; hash: string } {
+  if (!state || !Array.isArray(state.routes) || state.routes.length === 0) {
+    return { cleanState: state, hash: '' };
+  }
+  const idx = typeof state.index === 'number' ? state.index : state.routes.length - 1;
+  const target = state.routes[idx];
+  if (!target) return { cleanState: state, hash: '' };
+  if (target.state && Array.isArray(target.state.routes) && target.state.routes.length > 0) {
+    const nested = stripMetaAndExtractHash(target.state);
+    if (nested.cleanState === target.state && !nested.hash) {
+      return { cleanState: state, hash: '' };
+    }
+    const nextRoutes = state.routes.slice();
+    nextRoutes[idx] = { ...target, state: nested.cleanState };
+    return { cleanState: { ...state, routes: nextRoutes }, hash: nested.hash };
+  }
+  const params = target.params as Record<string, unknown> | undefined;
+  if (!params || !(META_KEY in params)) {
+    return { cleanState: state, hash: '' };
+  }
+  const meta = (params[META_KEY] ?? {}) as NativeRouteMeta;
+  const hash = normalizeHash(meta.hash);
+  const nextParams = { ...params };
+  delete nextParams[META_KEY];
+  const nextRoutes = state.routes.slice();
+  nextRoutes[idx] = {
+    ...target,
+    params: Object.keys(nextParams).length > 0 ? nextParams : undefined,
+  };
+  return { cleanState: { ...state, routes: nextRoutes }, hash };
+}
+
+/**
+ * Wraps any React Navigation `linking` config so `#hash` fragments round-trip cleanly on native
+ * without leaking into query/path params or serializing adapter metadata (`__urMeta`).
+ * Automatically applied to custom `linking` configs passed to `<NativeRouterProvider>`.
+ */
+export function withHashLinking<T extends LinkingOptions<any>>(
+  linking: T,
+): T & Required<Pick<LinkingOptions<any>, 'getStateFromPath' | 'getPathFromState'>> {
+  if (!linking || (linking as any)[HASH_LINKING_MARKER]) {
+    return linking as T & Required<Pick<LinkingOptions<any>, 'getStateFromPath' | 'getPathFromState'>>;
+  }
+  const baseGetStateFromPath = linking.getStateFromPath ?? getStateFromPath;
+  const baseGetPathFromState = linking.getPathFromState ?? getPathFromState;
+  const wrapped = {
+    ...linking,
+    getStateFromPath: (path: string, options?: any) => {
+      const hashIdx = path.indexOf('#');
+      if (hashIdx === -1) return baseGetStateFromPath(path, options);
+      const withoutHash = path.slice(0, hashIdx);
+      const hash = normalizeHash(path.slice(hashIdx + 1));
+      const state = baseGetStateFromPath(withoutHash, options);
+      return hash ? injectMetaHashIntoState(state, hash) : state;
+    },
+    getPathFromState: (state: any, options?: any) => {
+      const { cleanState, hash } = stripMetaAndExtractHash(state);
+      const path = baseGetPathFromState(cleanState, options);
+      if (hash && typeof path === 'string' && !path.includes('#')) {
+        return `${path}#${hash}`;
+      }
+      return path;
+    },
+  };
+  Object.defineProperty(wrapped, HASH_LINKING_MARKER, { value: true });
+  return wrapped as T & Required<Pick<LinkingOptions<any>, 'getStateFromPath' | 'getPathFromState'>>;
 }
 
 /**
@@ -414,17 +656,21 @@ export function createLinking(
   registry: RouteRegistry<any>,
   prefixes: string[],
   openWeb?: (url: string) => void,
+  getRouteContext?: () => unknown,
 ): LinkingOptions<RNParamListBase> {
-  return {
+  const config: LinkingOptions<RNParamListBase> = {
     prefixes,
     config: registry.toLinkingConfig(prefixes).config as LinkingOptions<RNParamListBase>['config'],
     getStateFromPath: (path) => {
-      const state = getStateFromUrl(registry, path);
-      if (!state) openWeb?.(registry.resolveTarget(path.startsWith('/') ? path : `/${path}`).path);
+      const ctx = getRouteContext?.();
+      const state = getStateFromUrl(registry, path, ctx);
+      if (!state) openWeb?.(registry.resolveTarget(path.startsWith('/') ? path : `/${path}`, undefined, undefined, ctx).path);
       return state as any;
     },
     getPathFromState: (state) => unpackNativeRoute(getFocusedLeaf(state as AnyState)?.route, registry).path,
   };
+  Object.defineProperty(config, HASH_LINKING_MARKER, { value: true });
+  return config;
 }
 
 function createNativeController<TName extends string>(
@@ -433,6 +679,7 @@ function createNativeController<TName extends string>(
   screenNavigation: any,
   rnRoute: RNRoute<string> | undefined,
   route: UnifiedRoute<TName>,
+  routeContext?: unknown,
 ): RouterController<TName> {
   const ref = internal.containerRef;
   const root = () => (ref.isReady() ? ref.getRootState() : undefined);
@@ -473,13 +720,19 @@ function createNativeController<TName extends string>(
     params?: RouteParams,
     options?: NavigationOptions,
     allowWeb = true,
+    evaluateGuard = true,
   ) => {
-    const resolved = registry.resolveTarget(target, params, options);
+    const initial = resolveTargetFromRoute(registry, route, target, params, options, routeContext);
+    const guardEval = evaluateGuard ? resolveEntryGuardChain(registry, initial, routeContext) : null;
+    const resolved = guardEval?.kind === 'redirect' ? guardEval.intent : initial;
     if (!ref.isReady()) {
       console.warn('[react-router-navigation-adapter] Navigation ignored: the navigation container is not ready.');
       return null;
     }
-    const isNative = resolved.name != null && registry.getRoute(resolved.name)?.native === true;
+    const isNative =
+      resolved.name != null &&
+      registry.getRoute(resolved.name)?.native === true &&
+      registry.isRouteEnabled(resolved.name, routeContext);
     const plan = isNative ? planNavigation(root(), registry, resolved.name!) : undefined;
     if (!plan) {
       if (allowWeb) openWeb(resolved.path);
@@ -511,6 +764,34 @@ function createNativeController<TName extends string>(
     );
   };
 
+  /**
+   * Opens an overlay route, navigating to its base screen first when an explicit URL target
+   * specifies a different base pathname than the current screen.
+   */
+  const openOverlay = (r: Resolution, action: 'navigate' | 'push') => {
+    const currentBase = normalizePathname(route.basePathname ?? route.pathname);
+    const targetBase = normalizePathname(r.resolved.basePathname ?? '/');
+    if (!route.isOverlay && targetBase === currentBase) {
+      // Base screen stays mounted underneath: skip base screen's own leave guard (layout guards still run).
+      const perform = () => pushOrNavigate(r);
+      if (internal.runGuards(action, perform, { nextPath: r.resolved.path, exclude: rnRoute ? [rnRoute.key] : [] })) {
+        perform();
+      }
+      return;
+    }
+    if (targetBase !== currentBase) {
+      const baseResolution = resolve(r.resolved.basePathname ?? '/', undefined, undefined, false);
+      if (baseResolution) {
+        guarded(action, r.resolved.path, () => {
+          pushOrNavigate(baseResolution);
+          pushOrNavigate(r);
+        });
+        return;
+      }
+    }
+    guarded(action, r.resolved.path, () => pushOrNavigate(r));
+  };
+
   /** Replace the params of the current screen without remounting it (guarded when the pathname changes). */
   const replaceInPlace = (next: ResolvedNavigationIntent<TName>) => {
     if (!rnRoute) return;
@@ -527,7 +808,8 @@ function createNativeController<TName extends string>(
   const controller: RouterController<TName> = {
     platform: 'native',
     route,
-    buildUrl: (target, params, options) => registry.resolveTarget(target, params, options).path,
+    buildUrl: (target, params, options) =>
+      resolveTargetFromRoute(registry, route, target, params, options, routeContext).path,
     navigate: (target, params, options) => {
       const r = resolve(target, params, options);
       if (!r) return;
@@ -535,12 +817,14 @@ function createNativeController<TName extends string>(
       // (React Navigation's NAVIGATE would reuse a same-name screen instead).
       if (isCurrentScreen(r.name) && r.resolved.path === route.path) replaceInPlace(r.resolved);
       else if (r.resolved.pathname === route.pathname) pushOrNavigate(r);
+      else if (r.resolved.isOverlay) openOverlay(r, 'navigate');
       else guarded('navigate', r.resolved.path, () => pushOrNavigate(r));
     },
     push: (target, params, options) => {
       const r = resolve(target, params, options);
       if (!r) return;
       if (r.resolved.pathname === route.pathname) pushOrNavigate(r);
+      else if (r.resolved.isOverlay) openOverlay(r, 'push');
       else guarded('push', r.resolved.path, () => pushOrNavigate(r));
     },
     replace: (target, params, options) => {
@@ -549,7 +833,27 @@ function createNativeController<TName extends string>(
       if (isCurrentScreen(r.name)) return replaceInPlace(r.resolved);
       if (!r.plan.ownerFocused) return guarded('replace', r.resolved.path, () => navigateNested(r));
       const owner = r.plan.owner!;
-      if (owner.type !== 'stack') return guarded('replace', r.resolved.path, () => dispatch(CommonActions.navigate(r.name, r.payload), owner));
+      if (owner.type !== 'stack') {
+        const targetIndex = owner.routes.findIndex((rt) => rt.name === r.name);
+        if (owner.type === 'tab' && targetIndex !== -1) {
+          const nextRoutes = owner.routes.map((rt, idx) =>
+            idx === targetIndex ? { ...rt, params: r.payload } : rt,
+          );
+          const prevHistory = Array.isArray((owner as any).history) ? (owner as any).history : [];
+          const trimmedHistory = prevHistory.length > 0 ? prevHistory.slice(0, -1) : [];
+          return guarded('replace', r.resolved.path, () =>
+            dispatch(
+              CommonActions.reset({
+                index: targetIndex,
+                routes: nextRoutes,
+                history: trimmedHistory,
+              } as any),
+              owner,
+            ),
+          );
+        }
+        return guarded('replace', r.resolved.path, () => dispatch(CommonActions.navigate(r.name, r.payload), owner));
+      }
       // The replaced screen's own guard runs through usePreventRemove.
       const removed = rnRoute?.key ?? (owner.routes[owner.index]?.key as string);
       guarded('replace', r.resolved.path, () => dispatch(StackActions.replace(r.name, r.payload), owner, rnRoute?.key), [removed]);
@@ -574,18 +878,31 @@ function createNativeController<TName extends string>(
         controller.goBack();
       } else {
         // Further back than this stack: same as going back from its root.
-        backAtRoot(registry, route, controller, internal.onBackAtRoot, (proceed) =>
-          internal.runGuards('goBack', proceed, { include: rnRoute ? [rnRoute.key] : [] }),
+        backAtRoot(
+          registry,
+          route,
+          controller,
+          internal.onBackAtRoot,
+          (proceed) => internal.runGuards('goBack', proceed, { include: rnRoute ? [rnRoute.key] : [] }),
+          routeContext,
         );
       }
     },
     goBack: () => {
       if (controller.canGoBack()) {
         const key = leafKey();
-        guarded('goBack', undefined, () => (screenNavigation ?? ref).goBack(), key ? [key] : []);
+        const owner = key ? findNavigatorOf(root(), key) : undefined;
+        // Only stack pops remove the route (firing usePreventRemove); tab/drawer goBack switches index without removing.
+        const removed = owner?.type === 'stack' && key ? [key] : [];
+        guarded('goBack', undefined, () => (screenNavigation ?? ref).goBack(), removed);
       } else {
-        backAtRoot(registry, route, controller, internal.onBackAtRoot, (proceed) =>
-          internal.runGuards('goBack', proceed, { include: rnRoute ? [rnRoute.key] : [] }),
+        backAtRoot(
+          registry,
+          route,
+          controller,
+          internal.onBackAtRoot,
+          (proceed) => internal.runGuards('goBack', proceed, { include: rnRoute ? [rnRoute.key] : [] }),
+          routeContext,
         );
       }
     },
@@ -595,13 +912,16 @@ function createNativeController<TName extends string>(
       const lastTarget = index === undefined ? targets.length - 1 : Math.max(0, Math.min(index, targets.length - 1));
       const kept = targets.slice(0, lastTarget + 1);
       const lastEntry = kept[kept.length - 1];
-      const focusedUrl = (
-        typeof lastEntry === 'string' ? registry.resolveTarget(lastEntry) : registry.resolveTarget(lastEntry.name, lastEntry.params, lastEntry)
-      ).path;
-      const resolved = kept.map((entry) =>
+      const rawFocused =
+        typeof lastEntry === 'string'
+          ? registry.resolveTarget(lastEntry, undefined, undefined, routeContext)
+          : registry.resolveTarget(lastEntry.name, lastEntry.params, lastEntry, routeContext);
+      const focusedGuard = resolveEntryGuardChain(registry, rawFocused, routeContext);
+      const focusedUrl = (focusedGuard.kind === 'redirect' ? focusedGuard.intent : rawFocused).path;
+      const resolved = kept.map((entry, idx) =>
         typeof entry === 'string'
-          ? resolve(entry, undefined, undefined, false)
-          : resolve(entry.name, entry.params, entry, false),
+          ? resolve(entry, undefined, undefined, false, idx === kept.length - 1)
+          : resolve(entry.name, entry.params, entry, false, idx === kept.length - 1),
       );
       // The indexed entry has no native screen: it opens in the WebView over the reset stack.
       const webUrl = resolved[resolved.length - 1] ? undefined : focusedUrl;
@@ -632,14 +952,38 @@ function createNativeController<TName extends string>(
       guarded('reset', webUrl ?? active[last].resolved.path, perform, removing);
     },
     setParams: (partial) => {
-      const next = resolveParamsUpdate(registry, route, partial);
+      const next = resolveParamsUpdate(registry, route, partial, routeContext);
       if (next) replaceInPlace(next);
     },
     setQuery: (input, options) => {
       const next = { ...route, query: mergeQuery(route.query, input, options?.merge ?? true) };
       const nextUrl = formatRelativeUrl(next.pathname, next.query, next.hash);
-      if (options?.replace ?? true) replaceInPlace({ ...next, path: nextUrl });
-      else if (route.name) controller.push(nextUrl, undefined, { state: next.state });
+      if (options?.replace ?? true) {
+        replaceInPlace({
+          ...next,
+          path: nextUrl,
+          matchedPattern: route.matchedPattern ?? undefined,
+          basePathname: route.basePathname,
+        });
+      } else if (route.name) {
+        controller.push(nextUrl, undefined, { state: next.state });
+      }
+    },
+    openExternal: (url) => {
+      const open = webOpener(url);
+      guarded('navigate', url, () => open(url));
+    },
+    reload: () => {
+      const perform = () => {
+        if (internal.onReload) {
+          internal.onReload();
+        } else {
+          console.warn(
+            '[react-router-navigation-adapter] reload() has no default on React Native. Pass onReload to <RouterProvider>.',
+          );
+        }
+      };
+      guarded('replace', route.path, perform);
     },
   };
   return controller;
@@ -647,10 +991,12 @@ function createNativeController<TName extends string>(
 
 function NativeRouterBridge<TName extends string>({
   routes,
+  routeContext,
   internal,
   children,
 }: {
   routes: RouteRegistry<TName>;
+  routeContext?: unknown;
   internal: NativeInternal;
   children: React.ReactNode;
 }) {
@@ -660,7 +1006,7 @@ function NativeRouterBridge<TName extends string>({
 
       useRoute: () => {
         const active = useActiveRoute(useContext(NativeInternalContext)!);
-        return useMemo(() => unpackNativeRoute(active, routes), [active]);
+        return useMemo(() => unpackNativeRoute(active, routes), [active, routes]);
       },
 
       useController: () => {
@@ -668,8 +1014,16 @@ function NativeRouterBridge<TName extends string>({
         const ctx = useContext(NativeInternalContext)!;
         const active = useActiveRoute(ctx);
         return useMemo(
-          () => createNativeController(routes, ctx, screenNavigation, active, unpackNativeRoute(active, routes)),
-          [ctx, screenNavigation, active],
+          () =>
+            createNativeController(
+              routes,
+              ctx,
+              screenNavigation,
+              active,
+              unpackNativeRoute(active, routes),
+              routeContext,
+            ),
+          [routes, ctx, screenNavigation, active, routeContext],
         );
       },
 
@@ -730,10 +1084,13 @@ function NativeRouterBridge<TName extends string>({
         return useSyncExternalStore(ctx.subscribeSnapshot, () => ctx.getSnapshot().action);
       },
     }),
-    [routes],
+    [routes, routeContext],
   );
 
-  const contextValue = useMemo(() => ({ registry: routes, adapter }), [routes, adapter]);
+  const contextValue = useMemo(
+    () => ({ registry: routes, adapter, routeContext }),
+    [routes, adapter, routeContext],
+  );
 
   return (
     <NativeInternalContext.Provider value={internal}>
@@ -747,11 +1104,15 @@ function NativeRouterBridge<TName extends string>({
  */
 export function NativeRouterProvider<TName extends string = string>({
   routes,
+  routeContext,
   children,
   initialUrl,
   linkingPrefixes,
   linking,
   openWeb,
+  onExternal,
+  onReload,
+  routerRef,
   onBackAtRoot,
   getUserConfirmation,
   navigationRef,
@@ -762,26 +1123,36 @@ export function NativeRouterProvider<TName extends string = string>({
   independent,
   useExistingContainer,
 }: NativeRouterProviderProps<TName>) {
+  const resolvedOpenWeb = openWeb ?? onExternal;
   const parentContainer = useContext(NavigationContainerRefContext) as ContainerRef | undefined;
   const reuse = useExistingContainer ?? (parentContainer != null && !independent);
 
   const [ownRef] = useState(() => navigationRef ?? createNavigationContainerRef<RNParamListBase>());
   const containerRef: ContainerRef = (reuse && parentContainer) || ownRef;
+  const routesRef = useRef(routes);
+  routesRef.current = routes;
+  const routeContextRef = useRef(routeContext);
+  routeContextRef.current = routeContext;
 
   // Opening from a path: resolve once; non-native URLs go to the WebView instead.
   const [initial] = useState(() => {
     if (initialState || !initialUrl || reuse) return { state: initialState, webUrl: undefined };
-    const state = getStateFromUrl(routes, initialUrl);
+    const state = getStateFromUrl(routes, initialUrl, routeContext);
     return { state, webUrl: state ? undefined : initialUrl };
   });
   useEffect(() => {
-    if (initial.webUrl) openWeb?.(initial.webUrl);
-  }, [initial.webUrl, openWeb]);
+    if (initial.webUrl) resolvedOpenWeb?.(initial.webUrl);
+  }, [initial.webUrl, resolvedOpenWeb]);
 
   const snapshotRef = useRef<Snapshot>({ leaf: getFocusedLeaf(initial.state)?.route, action: 'POP' });
   const snapshotListenersRef = useRef(new Set<() => void>());
   const listenersRef = useRef(new Set<NavigationListener>());
-  const lastRef = useRef<{ route?: RNRoute<string>; siblings: string[] }>({ siblings: [] });
+  const lastRef = useRef<{
+    route?: RNRoute<string>;
+    siblings: string[];
+    ownerType?: string;
+    historyLength?: number;
+  }>({ siblings: [] });
 
   // Track the focused route for hooks used outside screens and for `listen()`.
   const syncState = useRef(() => {});
@@ -792,15 +1163,31 @@ export function NativeRouterProvider<TName extends string = string>({
     if (!leaf || leaf.route === last.route) return;
     let action: HistoryAction = 'REPLACE';
     if (last.route && leaf.route.key !== last.route.key) {
-      if (last.siblings.includes(leaf.route.key)) action = 'POP';
-      else if (leaf.siblings.includes(last.route.key)) action = 'PUSH';
+      if (
+        leaf.ownerType === 'tab' &&
+        last.ownerType === 'tab' &&
+        leaf.historyLength !== undefined &&
+        last.historyLength !== undefined
+      ) {
+        if (leaf.historyLength < last.historyLength) action = 'POP';
+        else if (leaf.historyLength > last.historyLength) action = 'PUSH';
+      } else if (last.siblings.includes(leaf.route.key)) {
+        action = 'POP';
+      } else if (leaf.siblings.includes(last.route.key)) {
+        action = 'PUSH';
+      }
     }
     const isInitial = !last.route;
-    lastRef.current = { route: leaf.route, siblings: leaf.siblings };
+    lastRef.current = {
+      route: leaf.route,
+      siblings: leaf.siblings,
+      ownerType: leaf.ownerType,
+      historyLength: leaf.historyLength,
+    };
     snapshotRef.current = { leaf: leaf.route, action: isInitial ? 'POP' : action };
     snapshotListenersRef.current.forEach((onChange) => onChange());
     if (!isInitial) {
-      const unified = unpackNativeRoute(leaf.route, routes);
+      const unified = unpackNativeRoute(leaf.route, routesRef.current);
       listenersRef.current.forEach((listener) => listener(unified, action));
     }
   };
@@ -811,8 +1198,8 @@ export function NativeRouterProvider<TName extends string = string>({
   }, [containerRef]);
 
   // Host callbacks are often inline arrows: read them through a ref so context stays stable.
-  const callbacksRef = useRef({ openWeb, onBackAtRoot, getUserConfirmation });
-  callbacksRef.current = { openWeb, onBackAtRoot, getUserConfirmation };
+  const callbacksRef = useRef({ openWeb: resolvedOpenWeb, onReload, onBackAtRoot, getUserConfirmation });
+  callbacksRef.current = { openWeb: resolvedOpenWeb, onReload, onBackAtRoot, getUserConfirmation };
   const confirm: GetUserConfirmation = (message, callback) =>
     (callbacksRef.current.getUserConfirmation ?? defaultConfirm)(message, callback);
   const guardsRef = useRef(new Set<{ handler: GuardHandlerRef; routeKey: string | null }>());
@@ -837,6 +1224,9 @@ export function NativeRouterProvider<TName extends string = string>({
       get openWeb() {
         return callbacksRef.current.openWeb;
       },
+      get onReload() {
+        return callbacksRef.current.onReload;
+      },
       get onBackAtRoot() {
         return callbacksRef.current.onBackAtRoot;
       },
@@ -849,6 +1239,14 @@ export function NativeRouterProvider<TName extends string = string>({
         };
       },
       hasGuards: () => guardsRef.current.size > 0,
+      withBypass: (fn) => {
+        bypassRef.current = true;
+        try {
+          fn();
+        } finally {
+          bypassRef.current = false;
+        }
+      },
       runGuards: (action, proceed, options = {}) => {
         if (bypassRef.current || guardsRef.current.size === 0) return true;
         const active = new Set([
@@ -875,6 +1273,43 @@ export function NativeRouterProvider<TName extends string = string>({
     [containerRef],
   );
 
+  useEffect(() => {
+    const getCurrentLeaf = () =>
+      (containerRef.isReady() ? getFocusedLeaf(containerRef.getRootState())?.route : undefined) ??
+      snapshotRef.current.leaf;
+    const getCurrentRoute = () => unpackNativeRoute(getCurrentLeaf(), routesRef.current);
+    const getCurrentController = () =>
+      createNativeController(
+        routesRef.current,
+        internal,
+        undefined,
+        getCurrentLeaf(),
+        getCurrentRoute(),
+        routeContextRef.current,
+      );
+    const handle: ImperativeRouter<TName> = {
+      platform: 'native',
+      getLocation: () => toImperativeLocation(getCurrentRoute()),
+      getRoute: () => getCurrentRoute(),
+      subscribe: (listener) =>
+        internal.subscribe((r, action) => listener(toImperativeLocation(r), action)),
+      navigate: (...args) => getCurrentController().navigate(...args),
+      push: (...args) => getCurrentController().push(...args),
+      replace: (...args) => getCurrentController().replace(...args),
+      goBack: () => getCurrentController().goBack(),
+      go: (delta) => getCurrentController().go(delta),
+      canGoBack: () => getCurrentController().canGoBack(),
+      getLength: () => getCurrentController().getLength(),
+      reset: (...args) => getCurrentController().reset(...args),
+      setParams: (partial) => getCurrentController().setParams(partial),
+      setQuery: (...args) => getCurrentController().setQuery(...args),
+      buildUrl: (...args) => getCurrentController().buildUrl(...args),
+      openExternal: (...args) => getCurrentController().openExternal(...args),
+      reload: () => getCurrentController().reload(),
+    };
+    return registerImperativeRouter(handle, routerRef);
+  }, [containerRef, internal, routerRef]);
+
   // Reused (host) container: it has its own state, so open `initialUrl` by navigating to it once
   // the target screen's navigator is mounted (non-native URLs go to openWeb right away).
   const pendingUrlRef = useRef(reuse && !initialState ? initialUrl : undefined);
@@ -882,12 +1317,18 @@ export function NativeRouterProvider<TName extends string = string>({
     const open = () => {
       const url = pendingUrlRef.current;
       if (!url || !containerRef.isReady()) return;
-      const resolved = routes.resolveTarget(/^\/|:\/\//.test(url) ? url : `/${url}`);
-      const isNative = resolved.name != null && routes.getRoute(resolved.name)?.native === true;
+      const ctx = routeContextRef.current;
+      const resolved = routes.resolveTarget(/^\/|:\/\//.test(url) ? url : `/${url}`, undefined, undefined, ctx);
+      const isNative =
+        resolved.name != null &&
+        routes.getRoute(resolved.name)?.native === true &&
+        routes.isRouteEnabled(resolved.name, ctx);
       if (isNative && !planNavigation(containerRef.getRootState(), routes, resolved.name!)) return;
       pendingUrlRef.current = undefined;
       const leaf = snapshotRef.current.leaf;
-      createNativeController(routes, internal, undefined, leaf, unpackNativeRoute(leaf, routes)).navigate(resolved.path);
+      createNativeController(routes, internal, undefined, leaf, unpackNativeRoute(leaf, routes), ctx).navigate(
+        resolved.path,
+      );
     };
     open();
     return pendingUrlRef.current ? containerRef.addListener('state', open) : undefined;
@@ -907,20 +1348,26 @@ export function NativeRouterProvider<TName extends string = string>({
         return !internal.runGuards('goBack', goBack, { exclude: leaf ? [leaf.key] : [] });
       }
       const route = unpackNativeRoute(leaf, routes);
-      if (!internal.onBackAtRoot && !routes.resolveParent(route)) return false;
-      createNativeController(routes, internal, undefined, leaf, route).goBack();
+      const ctx = routeContextRef.current;
+      if (!internal.onBackAtRoot && !routes.resolveParent(route, ctx)) return false;
+      createNativeController(routes, internal, undefined, leaf, route, ctx).goBack();
       return true;
     });
     return () => subscription.remove();
   }, [containerRef, internal, routes]);
 
   const resolvedLinking = useMemo(
-    () => linking ?? (linkingPrefixes?.length ? createLinking(routes, linkingPrefixes, openWeb) : undefined),
-    [linking, linkingPrefixes, routes, openWeb],
+    () =>
+      linking
+        ? withHashLinking(linking as any)
+        : linkingPrefixes?.length
+          ? createLinking(routes, linkingPrefixes, resolvedOpenWeb, () => routeContextRef.current)
+          : undefined,
+    [linking, linkingPrefixes, routes, resolvedOpenWeb],
   );
 
   const bridge = (
-    <NativeRouterBridge routes={routes} internal={internal}>
+    <NativeRouterBridge routes={routes} routeContext={routeContext} internal={internal}>
       {children}
     </NativeRouterBridge>
   );

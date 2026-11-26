@@ -18,5 +18,5 @@
     "rootDir": ".",
     "outDir": "./dist"
   },
-  "include": ["src", "tests", "examples", "typings"]
+  "include": ["src", "tests", "examples", "typings", "codemod"]
 }

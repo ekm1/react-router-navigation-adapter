@@ -127,7 +127,7 @@ describe.each<Platform>(['web', 'native'])('B1 guards are never bypassed (%s)', 
   it('guards run before onBackAtRoot', () => {
     const confirm = declineThenAccept();
     const onBackAtRoot = vi.fn();
-    renderApp(platform, { initialUrl: '/myBets/1', guard: true, confirm, onBackAtRoot });
+    renderApp(platform, { initialUrl: '/myBets', layoutGuard: true, confirm, onBackAtRoot });
     act(() => captured.screen!.goBack());
     expect(confirm).toHaveBeenCalledTimes(1);
     expect(onBackAtRoot).not.toHaveBeenCalled();
@@ -186,7 +186,7 @@ describe('B1 native: Android back at the root runs guards', () => {
   it('declines, then accepts', () => {
     const confirm = declineThenAccept();
     const onBackAtRoot = vi.fn();
-    renderApp('native', { initialUrl: '/myBets/1', guard: true, confirm, onBackAtRoot });
+    renderApp('native', { initialUrl: '/myBets', layoutGuard: true, confirm, onBackAtRoot });
     act(() => {
       expect((BackHandler as any).pressBack()).toBe(true);
     });
@@ -396,7 +396,7 @@ describe.each<Platform>(['web', 'native'])('B6 remaining parity guarantees (%s)'
   it('go(-n) past stack depth when depth > 0 invokes onBackAtRoot', () => {
     const onBackAtRoot = vi.fn();
     renderApp(platform, { initialUrl: '/myBets', onBackAtRoot });
-    act(() => captured.screen!.push('Ticket', { id: '1' }));
+    act(() => captured.screen!.push('Bets'));
     expect(captured.screen!.getLength()).toBe(2);
     act(() => captured.screen!.go(-5));
     expect(onBackAtRoot).toHaveBeenCalledTimes(1);

@@ -178,6 +178,20 @@ export function extractParamNames(pattern: string): string[] {
   return names;
 }
 
+export function extractRequiredParamNames(pattern: string): string[] {
+  const names: string[] = [];
+  const clean = pattern.replace(/^\/+|\/+$/g, '');
+  if (!clean) return names;
+
+  for (const segment of clean.split('/')) {
+    if (segment.startsWith(':') && !segment.endsWith('?')) {
+      const name = segment.slice(1);
+      if (name) names.push(name);
+    }
+  }
+  return names;
+}
+
 export function compilePathPattern(
   pattern: string,
   options: MatchPathOptions = {},
@@ -232,6 +246,54 @@ export function compilePathPattern(
     paramNames,
     regex: new RegExp(`^${regexBody}${suffix}`, sensitive ? '' : 'i'),
   };
+}
+
+/**
+ * Compiles a route pattern to match as a segment-aligned suffix of any pathname
+ * (for `overlay: true` routes). Capture group 1 is the prefix before the suffix
+ * (`""` or `"/prefix/..."`), followed by each pattern param in order.
+ */
+export function compileOverlaySuffixPattern(
+  pattern: string,
+  options: MatchPathOptions = {},
+): CompiledPattern {
+  const { strict = false, sensitive = false } = options;
+  const paramNames: string[] = [];
+  const hasTrailingSlash = pattern.endsWith('/');
+  const trimmed = pattern.replace(/^\/+|\/+$/g, '');
+  const segments = trimmed.split('/').filter(Boolean);
+
+  let regexBody = '';
+  for (const segment of segments) {
+    if (segment === '*') {
+      paramNames.push('*');
+      regexBody += '(?:/(.*))?';
+    } else if (segment.startsWith(':') && segment.endsWith('?')) {
+      const name = segment.slice(1, -1);
+      paramNames.push(name);
+      regexBody += '(?:/([^/]+))?';
+    } else if (segment.startsWith(':')) {
+      const name = segment.slice(1);
+      paramNames.push(name);
+      regexBody += '/([^/]+)';
+    } else {
+      regexBody += `/${escapeRegex(segment)}`;
+    }
+  }
+
+  const suffix = strict ? (hasTrailingSlash ? '/$' : '$') : '/?$';
+  return {
+    pattern,
+    paramNames,
+    regex: new RegExp(`^(.*)${regexBody}${suffix}`, sensitive ? '' : 'i'),
+  };
+}
+
+/** Joins a base pathname (e.g. "/" or "/projects/42") with an overlay suffix (e.g. "/preview/123"). */
+export function joinBaseAndOverlay(basePathname: string, overlaySuffix: string): string {
+  const cleanBase = normalizePathname(basePathname);
+  const cleanSuffix = overlaySuffix.startsWith('/') ? overlaySuffix : `/${overlaySuffix}`;
+  return cleanBase === '/' ? cleanSuffix : `${cleanBase}${cleanSuffix}`;
 }
 
 export function matchPathPattern(

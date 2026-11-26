@@ -7,7 +7,7 @@ import {
 } from 'react-router-dom';
 import type { Action, History, Location } from 'history';
 import { formatRelativeUrl } from '../pathUtils';
-import { mergeQuery, runGuard } from '../shared';
+import { mergeQuery, resolveLinkActive, runGuard } from '../shared';
 import type { GetUserConfirmation, NavigationGuardAction } from '../types';
 import {
   resolveTo,
@@ -16,10 +16,13 @@ import {
   type LiteGuard,
   type LiteLinkProps,
   type LiteLocation,
+  type LiteNavigationAction,
+  type LiteNavigationListener,
   type LiteRouter,
 } from './shared';
 
-const GUARD_ACTIONS: Record<Action, NavigationGuardAction> = { PUSH: 'push', REPLACE: 'replace', POP: 'goBack' };
+const LISTENER_ACTIONS: Record<Action, LiteNavigationAction> = { PUSH: 'push', REPLACE: 'replace', POP: 'goBack' };
+const GUARD_ACTIONS: Record<Action, NavigationGuardAction> = LISTENER_ACTIONS;
 
 const defaultConfirm: GetUserConfirmation = (message, callback) =>
   callback(typeof window !== 'undefined' && typeof window.confirm === 'function' ? window.confirm(message) : false);
@@ -126,16 +129,38 @@ export function useRouter(): LiteRouter {
       canGoBack: () => canGoBackIn(history),
       goBack: (fallback) => {
         if (canGoBackIn(history)) history.goBack();
+        else if (fallback) router.replace(fallback);
         else if (config.onBackAtRoot) {
           const leave = config.onBackAtRoot;
           if (runGuards(history, 'goBack', leave)) leave();
-        } else if (fallback) router.replace(fallback);
+        }
       },
       setQuery: (query, options) => {
         const next = mergeQuery(location.query, query, options?.merge ?? true);
         const url = formatRelativeUrl(location.pathname, next, location.hash);
         if (options?.replace ?? true) history.replace(url);
         else history.push(url);
+      },
+      openExternal: (url, options) => {
+        const perform = () => {
+          if (config.onExternal) {
+            config.onExternal(url);
+          } else if (typeof window !== 'undefined' && window.location) {
+            if (options?.replace) window.location.replace(url);
+            else window.location.assign(url);
+          }
+        };
+        if (runGuards(history, 'navigate', perform, url)) perform();
+      },
+      reload: () => {
+        const perform = () => {
+          if (config.onReload) {
+            config.onReload();
+          } else if (typeof window !== 'undefined' && window.location) {
+            window.location.reload();
+          }
+        };
+        if (runGuards(history, 'replace', perform, location.path)) perform();
       },
     };
     return router;
@@ -164,13 +189,19 @@ export function useNavigationGuard(when: boolean, messageOrHandler?: LiteGuard):
   }, [when, history]);
 }
 
-/** Calls `listener(location)` after every location change (e.g. analytics). */
-export function useNavigationListener(listener: (location: LiteLocation) => void): void {
+/** Calls `listener(location, action)` after every location change (e.g. analytics, host stack mirroring). */
+export function useNavigationListener(listener: LiteNavigationListener): void {
   const history = useHistory();
   const listenerRef = useRef(listener);
   listenerRef.current = listener;
   useEffect(
-    () => history.listen((location) => listenerRef.current(toLiteLocation(`${location.pathname}${location.search}${location.hash}`))),
+    () =>
+      history.listen((location, action) =>
+        listenerRef.current(
+          toLiteLocation(`${location.pathname}${location.search}${location.hash}`),
+          LISTENER_ACTIONS[action] ?? 'replace',
+        ),
+      ),
     [history],
   );
 }
@@ -186,15 +217,61 @@ export function useFocusEffect(effect: () => void | (() => void)): void {
   }, [effect]);
 }
 
-/** React Router `<Link>` (real `<a href>`, basename and modifier clicks handled by React Router). */
-export function Link({ to, replace, push: _push, children, style, className, testID, accessibilityLabel }: LiteLinkProps) {
+/** React Router `<Link>` (real `<a href>` or custom `component`, with `NavLink` active-state props). */
+export function Link({
+  to,
+  replace,
+  push: _push,
+  children,
+  style,
+  className,
+  activeClassName,
+  activeStyle,
+  exact,
+  strict,
+  sensitive,
+  isActive: isActiveProp,
+  component: CustomComponent,
+  disabled,
+  onClick,
+  onPress,
+  target,
+  rel,
+  testID,
+  accessibilityLabel,
+}: LiteLinkProps) {
   const location = useLocation();
+  const targetUrl = resolveTo(to, location);
+  const targetLoc = toLiteLocation(targetUrl);
+  const active = resolveLinkActive(
+    targetLoc.pathname,
+    { pathname: location.pathname, search: location.search, hash: location.hash },
+    { exact, strict, sensitive, isActive: isActiveProp },
+  );
+  const resolvedClassName = [className, active && activeClassName].filter(Boolean).join(' ') || undefined;
+  const resolvedStyle = active && activeStyle ? { ...style, ...activeStyle } : style;
+
   return (
     <RRLink
-      to={resolveTo(to, location)}
+      to={targetUrl}
       replace={replace}
-      style={style}
-      className={className}
+      component={CustomComponent}
+      style={resolvedStyle}
+      className={resolvedClassName}
+      aria-current={active ? 'page' : undefined}
+      aria-disabled={disabled || undefined}
+      target={target}
+      rel={rel}
+      onClick={
+        disabled
+          ? (e: React.MouseEvent<HTMLAnchorElement>) => e.preventDefault()
+          : onClick || onPress
+            ? (e: React.MouseEvent<HTMLAnchorElement>) => {
+                onClick?.(e);
+                onPress?.(e);
+              }
+            : undefined
+      }
       data-testid={testID}
       aria-label={accessibilityLabel}
     >
