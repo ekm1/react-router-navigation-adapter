@@ -10,6 +10,7 @@ import {
   normalizeQueryInput,
   parseRelativeUrl,
   safeDecode,
+  type ParsedUrl,
 } from './pathUtils';
 import type {
   NavigationOptions,
@@ -124,6 +125,29 @@ function selectPattern(
     if (preferred) return preferred;
   }
   return bestMatches[0];
+}
+
+const patternNameCache = new Map<string, { paramNames: string[]; requiredParamNames: string[] }>();
+function namesOf(pattern: string) {
+  let names = patternNameCache.get(pattern);
+  if (!names) {
+    names = { paramNames: extractParamNames(pattern), requiredParamNames: extractRequiredParamNames(pattern) };
+    patternNameCache.set(pattern, names);
+  }
+  return names;
+}
+
+/**
+ * The pattern of `paths` that `buildPath` would use for `params` (same rules as `selectPattern`).
+ * Lets callers learn a route's own matched pattern without re-matching the URL against the
+ * whole registry (which can also return another route's pattern when that route matches first).
+ */
+export function pickPattern(paths: readonly string[], params: RouteParams): string {
+  if (paths.length === 1) return paths[0];
+  return selectPattern(
+    { patterns: paths.map((pattern) => ({ pattern, regex: /$^/, ...namesOf(pattern) })) } as any,
+    params,
+  ).pattern;
 }
 
 /**
@@ -285,9 +309,10 @@ export function defineRoutes<TMap extends RouteConfigMap>(
     return null;
   };
 
-  const matchOverlayUrl = (url: string, context?: unknown): OverlayMatchResult<TName> | null => {
-    if (overlayEntries.length === 0) return null;
-    const parsed = parseRelativeUrl(url);
+  const matchOverlayParsed = (
+    parsed: ParsedUrl,
+    context?: unknown,
+  ): OverlayMatchResult<TName> | null => {
     const targetPathname = parsed.pathname;
 
     for (const entry of overlayEntries) {
@@ -324,10 +349,16 @@ export function defineRoutes<TMap extends RouteConfigMap>(
     return null;
   };
 
+  const matchOverlayUrl = (url: string, context?: unknown): OverlayMatchResult<TName> | null =>
+    overlayEntries.length === 0 ? null : matchOverlayParsed(parseRelativeUrl(url), context);
+
   const matchUrl = (url: string, context?: unknown): RouteMatchResult<TName> | null => {
-    const overlayMatch = matchOverlayUrl(url, context);
-    if (overlayMatch) return overlayMatch.overlay;
+    // Parse once and share it between the overlay and base passes.
     const parsed = parseRelativeUrl(url);
+    if (overlayEntries.length > 0) {
+      const overlayMatch = matchOverlayParsed(parsed, context);
+      if (overlayMatch) return overlayMatch.overlay;
+    }
     return matchBasePathname(parsed.pathname, parsed.query, parsed.hash, context);
   };
 

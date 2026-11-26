@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useEffect, useMemo } from 'react';
 import { Redirect as RRRedirect, Route, Switch, useLocation } from 'react-router-dom';
 import { WebRouteOverrideContext, useWebBypassNextPath } from '../adapters/web';
 import { useUniversalRouterContext } from '../context';
@@ -34,8 +34,11 @@ export interface WebRouterViewProps<TName extends string = string> {
 }
 
 function EntryGuardRedirect({ intent }: { intent: ResolvedNavigationIntent<any> }) {
-  const bypassNextPath = useWebBypassNextPath();
+  const [bypassNextPath, clearBypassNextPath] = useWebBypassNextPath();
   bypassNextPath(intent.path);
+  // <Redirect> navigates in its mount (layout) phase, before this passive effect: if no leave
+  // guard consumed the bypass by then, drop it so it cannot skip a later navigation's guards.
+  useEffect(() => clearBypassNextPath(intent.path));
   return (
     <RRRedirect
       to={{
@@ -119,8 +122,9 @@ export function RouterView<TName extends string = string>({
   if (overlayGuard?.kind === 'redirect') {
     return <EntryGuardRedirect intent={overlayGuard.intent} />;
   }
-  // If the base route guard redirects (when not covered by an overlay, or when base itself is denied), redirect.
-  if (!overlayOverride && baseGuard.kind === 'redirect') {
+  // If the base route guard redirects, redirect, also under an overlay: otherwise a URL such as
+  // `/admin/preview/1` would render the guarded base screen beneath the overlay.
+  if (baseGuard.kind === 'redirect') {
     return <EntryGuardRedirect intent={baseGuard.intent} />;
   }
 

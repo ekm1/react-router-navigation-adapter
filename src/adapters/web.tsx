@@ -2,6 +2,7 @@ import React, {
   createContext,
   useContext,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -40,6 +41,10 @@ import {
   runGuard,
 } from '../shared';
 import { registerImperativeRouter, toImperativeLocation } from '../imperative';
+import { useStableRouteContext } from '../stableContext';
+
+/** `useLayoutEffect` in the browser, `useEffect` during SSR (no warning). */
+const useIsomorphicLayoutEffect = typeof window !== 'undefined' ? useLayoutEffect : useEffect;
 import type {
   BackAtRootContext,
   GetUserConfirmation,
@@ -153,12 +158,21 @@ interface WebInternalState {
 
 const WebInternalContext = createContext<WebInternalState | null>(null);
 
-/** Internal hook allowing `<RouterView>` entry-guard redirects to bypass leave guards. */
-export function useWebBypassNextPath(): (path: string) => void {
+/**
+ * Internal hook allowing `<RouterView>` entry-guard redirects to bypass leave guards.
+ * Returns `[set, clear]`; `clear(path)` drops the bypass if nothing consumed it, so it cannot
+ * later skip the leave guards of an unrelated navigation to the same path.
+ */
+export function useWebBypassNextPath(): [(path: string) => void, (path: string) => void] {
   const ctx = useContext(WebInternalContext);
-  return (path: string) => {
-    if (ctx) ctx.bypassNextPathRef.current = path;
-  };
+  return [
+    (path: string) => {
+      if (ctx) ctx.bypassNextPathRef.current = path;
+    },
+    (path: string) => {
+      if (ctx && ctx.bypassNextPathRef.current === path) ctx.bypassNextPathRef.current = null;
+    },
+  ];
 }
 
 const GUARD_ACTIONS: Record<Action, NavigationGuardAction> = {
@@ -717,17 +731,26 @@ function WebRouterBridge<TName extends string>({
     return registerImperativeRouter(handle, routerRef);
   }, [history, internal, routerRef]);
 
-  const adapter = useMemo<RouterAdapter<TName>>(
-    () => ({
+  const adapter = useMemo<RouterAdapter<TName>>(() => {
+    // history v4 creates a new immutable location object per navigation, so every hook that
+    // sees the same location shares one matched route (instead of one registry scan per
+    // useRoute/useRouter/Link). The cache lives as long as this `routes`/`routeContext` pair.
+    const routeCache = new WeakMap<Location, UnifiedRoute<TName>>();
+    const routeFor = (location: Location): UnifiedRoute<TName> => {
+      let route = routeCache.get(location);
+      if (!route) {
+        route = toUnifiedRoute(location, routes, routeContext);
+        routeCache.set(location, route);
+      }
+      return route;
+    };
+    return {
       platform: 'web',
 
       useRoute: () => {
         const override = useContext(WebRouteOverrideContext);
         const location = useLocation();
-        const computed = useMemo(
-          () => toUnifiedRoute(location, routes, routeContext),
-          [location, routes, routeContext],
-        );
+        const computed = useMemo(() => routeFor(location), [location]);
         return (override?.route as UnifiedRoute<TName> | undefined) ?? computed;
       },
 
@@ -737,10 +760,8 @@ function WebRouterBridge<TName extends string>({
         const override = useContext(WebRouteOverrideContext);
         const ctx = useContext(WebInternalContext)!;
         const activeRoute = useMemo(
-          () =>
-            (override?.route as UnifiedRoute<TName> | undefined) ??
-            toUnifiedRoute(location, routes, routeContext),
-          [override, location, routes, routeContext],
+          () => (override?.route as UnifiedRoute<TName> | undefined) ?? routeFor(location),
+          [override, location],
         );
         return useMemo(
           () => createWebController(routes, rrHistory, ctx, activeRoute, routeContext),
@@ -797,9 +818,8 @@ function WebRouterBridge<TName extends string>({
         useLocation(); // re-render on change
         return useHistory().action;
       },
-    }),
-    [routes, routeContext],
-  );
+    };
+  }, [routes, routeContext]);
 
   const contextValue = useMemo(
     () => ({ registry: routes, adapter, routeContext }),
@@ -836,6 +856,7 @@ export function WebRouterProvider<TName extends string = string>({
   onNavigate,
   canGoBack,
 }: WebRouterProviderProps<TName>) {
+  routeContext = useStableRouteContext(routeContext);
   const existingHistory = useHistory();
   const isControlled = location !== undefined;
 
@@ -849,7 +870,9 @@ export function WebRouterProvider<TName extends string = string>({
   if (isControlled && controlledHistoryRef.current) {
     controlledHistoryRef.current.setOptions({ onNavigate, basename });
   }
-  useEffect(() => {
+  // Layout effect: apply the host's new location before paint, so the embedded tree never
+  // shows a frame of the previous route.
+  useIsomorphicLayoutEffect(() => {
     if (isControlled && controlledHistoryRef.current) {
       controlledHistoryRef.current.syncFromHost(location, locationState);
     }

@@ -49,6 +49,8 @@ import {
   runGuard,
 } from '../shared';
 import { registerImperativeRouter, toImperativeLocation } from '../imperative';
+import { pickPattern } from '../routeRegistry';
+import { useStableRouteContext } from '../stableContext';
 import type {
   BackAtRootContext,
   GetUserConfirmation,
@@ -474,7 +476,9 @@ export function unpackNativeRoute<TName extends string>(
     } else {
       try {
         pathname = registry.buildPath(definition.name, params);
-        matchedPattern = registry.matchUrl(pathname)?.pattern ?? definition.path;
+        // The route's own pattern for these params; re-matching `pathname` against the whole
+        // registry was a full scan and could return another (earlier) route's pattern.
+        matchedPattern = pickPattern(definition.paths, params);
       } catch {
         pathname = definition.path; // required params not set yet
       }
@@ -535,6 +539,11 @@ export function getStateFromUrl(
       const baseDef = registry.getRoute(overlayMatch.base.name);
       if (baseDef?.native && registry.isRouteEnabled(baseDef.name, routeContext)) {
         const resolvedBase = registry.resolveTarget(overlayMatch.basePathname, undefined, undefined, routeContext);
+        // A guarded base screen denies the whole URL, as on web (`/admin/preview/1` → login).
+        const baseGuard = resolveEntryGuardChain(registry, resolvedBase, routeContext);
+        if (baseGuard.kind === 'redirect') {
+          return stateFromResolvedIntent(registry, baseGuard.intent, routeContext);
+        }
         const baseScreen = { name: baseDef.name, params: packParams(registry, resolvedBase) };
         const baseNested = baseDef.nestedIn ?? [];
         if (baseNested.join('/') === overlayNested.join('/')) {
@@ -1000,13 +1009,25 @@ function NativeRouterBridge<TName extends string>({
   internal: NativeInternal;
   children: React.ReactNode;
 }) {
-  const adapter = useMemo<RouterAdapter<TName>>(
-    () => ({
+  const adapter = useMemo<RouterAdapter<TName>>(() => {
+    // React Navigation route objects are immutable, so every hook in every screen that sees the
+    // same route object shares one unpacked route (instead of one per useRoute/useRouter call).
+    const unpackCache = new WeakMap<object, UnifiedRoute<TName>>();
+    const unpack = (active: RNRoute<string> | undefined): UnifiedRoute<TName> => {
+      if (!active) return unpackNativeRoute(active, routes);
+      let unified = unpackCache.get(active);
+      if (!unified) {
+        unified = unpackNativeRoute(active, routes);
+        unpackCache.set(active, unified);
+      }
+      return unified;
+    };
+    return {
       platform: 'native',
 
       useRoute: () => {
         const active = useActiveRoute(useContext(NativeInternalContext)!);
-        return useMemo(() => unpackNativeRoute(active, routes), [active, routes]);
+        return useMemo(() => unpack(active), [active]);
       },
 
       useController: () => {
@@ -1020,7 +1041,7 @@ function NativeRouterBridge<TName extends string>({
               ctx,
               screenNavigation,
               active,
-              unpackNativeRoute(active, routes),
+              unpack(active),
               routeContext,
             ),
           [routes, ctx, screenNavigation, active, routeContext],
@@ -1083,9 +1104,8 @@ function NativeRouterBridge<TName extends string>({
         const ctx = useContext(NativeInternalContext)!;
         return useSyncExternalStore(ctx.subscribeSnapshot, () => ctx.getSnapshot().action);
       },
-    }),
-    [routes, routeContext],
-  );
+    };
+  }, [routes, routeContext]);
 
   const contextValue = useMemo(
     () => ({ registry: routes, adapter, routeContext }),
@@ -1123,6 +1143,7 @@ export function NativeRouterProvider<TName extends string = string>({
   independent,
   useExistingContainer,
 }: NativeRouterProviderProps<TName>) {
+  routeContext = useStableRouteContext(routeContext);
   const resolvedOpenWeb = openWeb ?? onExternal;
   const parentContainer = useContext(NavigationContainerRefContext) as ContainerRef | undefined;
   const reuse = useExistingContainer ?? (parentContainer != null && !independent);
@@ -1186,7 +1207,7 @@ export function NativeRouterProvider<TName extends string = string>({
     };
     snapshotRef.current = { leaf: leaf.route, action: isInitial ? 'POP' : action };
     snapshotListenersRef.current.forEach((onChange) => onChange());
-    if (!isInitial) {
+    if (!isInitial && listenersRef.current.size > 0) {
       const unified = unpackNativeRoute(leaf.route, routesRef.current);
       listenersRef.current.forEach((listener) => listener(unified, action));
     }
