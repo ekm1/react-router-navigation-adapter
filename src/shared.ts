@@ -1,15 +1,15 @@
 import { isValidElement, type ReactElement } from 'react';
 import {
   extractParamNames,
-  extractRequiredParamNames,
+  formatHash,
   formatRelativeUrl,
   generatePathFromPattern,
   joinBaseAndOverlay,
-  normalizeHash,
   normalizeQueryInput,
   parseRelativeUrl,
   stringifyQueryParams,
 } from './pathUtils';
+import { pickPattern } from './routeRegistry';
 import type {
   BackAtRootContext,
   GetUserConfirmation,
@@ -184,46 +184,36 @@ export function resolveParamsUpdate(
       path: formatRelativeUrl(pathname, intent.query, intent.hash),
     };
   };
-  if (def && def.paths.length > 1 && route.matchedPattern && def.paths.includes(route.matchedPattern)) {
-    const preferredParams = extractParamNames(route.matchedPattern);
-    const preferredRequired = extractRequiredParamNames(route.matchedPattern);
-    const preferredSatisfied = preferredRequired.every(
-      (k) => mergedParams[k] !== undefined && mergedParams[k] !== null,
-    );
-    if (preferredSatisfied) {
-      const preferredConsumed = preferredParams.filter(
-        (k) => mergedParams[k] !== undefined && mergedParams[k] !== null,
-      ).length;
-      const anyBetter = def.paths.some((p) => {
-        const req = extractRequiredParamNames(p);
-        if (!req.every((k) => mergedParams[k] !== undefined && mergedParams[k] !== null)) return false;
-        const consumed = extractParamNames(p).filter(
-          (k) => mergedParams[k] !== undefined && mergedParams[k] !== null,
-        ).length;
-        return consumed > preferredConsumed;
-      });
-      if (!anyBetter) {
-        const pathParams: RouteParams = {};
-        const extra: QueryInput = {};
-        for (const [k, v] of Object.entries(mergedParams)) {
-          if (preferredParams.includes(k)) pathParams[k] = v;
-          else extra[k] = v as QueryInput[string];
-        }
-        const mergedQuery = { ...normalizeQueryInput(extra), ...query };
-        const pathname = generatePathFromPattern(route.matchedPattern, pathParams, def.stringify);
-        return applyOverlayPrefix({
-          name: route.name,
-          params: pathParams,
-          query: mergedQuery,
-          hash: route.hash,
-          state: route.state,
-          pathname,
-          path: formatRelativeUrl(pathname, mergedQuery, route.hash),
-          matchedPattern: route.matchedPattern,
-          ...(def.overlay ? { isOverlay: true } : {}),
-        });
-      }
+  // Multi-path route: stay on the alias the screen was opened with while it still fits best
+  // (e.g. `/p/:id/details` keeps that shape when only `id` changes).
+  const keptPattern = route.matchedPattern;
+  if (
+    def &&
+    keptPattern &&
+    def.paths.length > 1 &&
+    def.paths.includes(keptPattern) &&
+    pickPattern(def.paths, mergedParams, keptPattern) === keptPattern
+  ) {
+    const patternParams = extractParamNames(keptPattern);
+    const pathParams: RouteParams = {};
+    const extra: QueryInput = {};
+    for (const [k, v] of Object.entries(mergedParams)) {
+      if (patternParams.includes(k)) pathParams[k] = v;
+      else extra[k] = v as QueryInput[string];
     }
+    const mergedQuery = { ...normalizeQueryInput(extra), ...query };
+    const pathname = generatePathFromPattern(keptPattern, pathParams, def.stringify);
+    return applyOverlayPrefix({
+      name: route.name,
+      params: pathParams,
+      query: mergedQuery,
+      hash: route.hash,
+      state: route.state,
+      pathname,
+      path: formatRelativeUrl(pathname, mergedQuery, route.hash),
+      matchedPattern: keptPattern,
+      ...(def.overlay ? { isOverlay: true } : {}),
+    });
   }
   return applyOverlayPrefix(
     registry.resolveTarget(
@@ -360,7 +350,7 @@ export function toLinkLocation(route: UnifiedRoute<any>): LinkLocation {
   return {
     pathname: route.pathname,
     search: stringifyQueryParams(route.query),
-    hash: route.hash ? `#${normalizeHash(route.hash)}` : '',
+    hash: formatHash(route.hash),
     state: route.state,
     key: route.key,
   };

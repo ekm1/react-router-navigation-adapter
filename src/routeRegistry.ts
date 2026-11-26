@@ -142,11 +142,12 @@ function namesOf(pattern: string) {
  * Lets callers learn a route's own matched pattern without re-matching the URL against the
  * whole registry (which can also return another route's pattern when that route matches first).
  */
-export function pickPattern(paths: readonly string[], params: RouteParams): string {
+export function pickPattern(paths: readonly string[], params: RouteParams, preferredPattern?: string): string {
   if (paths.length === 1) return paths[0];
   return selectPattern(
     { patterns: paths.map((pattern) => ({ pattern, regex: /$^/, ...namesOf(pattern) })) } as any,
     params,
+    preferredPattern,
   ).pattern;
 }
 

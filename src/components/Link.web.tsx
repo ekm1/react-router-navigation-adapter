@@ -2,7 +2,7 @@ import React, { forwardRef, useCallback } from 'react';
 import { useHistory } from 'react-router-dom';
 import { useUniversalRouterContext } from '../context';
 import { useRoute, useRouter } from '../hooks';
-import { normalizeHash, stringifyQueryParams } from '../pathUtils';
+import { toLocationDescriptor } from '../pathUtils';
 import { resolveLinkActive, resolveTargetFromRoute, toLinkLocation } from '../shared';
 import type { CommonLinkProps } from '../types';
 
@@ -50,11 +50,8 @@ function LinkImpl<TName extends string>(
   const history = useHistory();
   const resolved = resolveTargetFromRoute(registry, currentRoute, to, params, { query, hash }, routeContext);
   // createHref applies the router's basename, so new-tab/copy-link URLs are correct.
-  const href = history.createHref({
-    pathname: resolved.pathname,
-    search: stringifyQueryParams(resolved.query),
-    hash: resolved.hash ? `#${normalizeHash(resolved.hash)}` : '',
-  });
+  const { state: _state, ...hrefLocation } = toLocationDescriptor(resolved);
+  const href = history.createHref(hrefLocation);
   const active = resolveLinkActive(resolved.pathname, toLinkLocation(currentRoute), {
     exact,
     strict,

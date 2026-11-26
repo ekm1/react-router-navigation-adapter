@@ -6,7 +6,7 @@ import {
   formatRelativeUrl,
   normalizeHash,
   parseQueryString,
-  stringifyQueryParams,
+  toLocationDescriptor,
 } from '../pathUtils';
 import { evaluateEntryGuard } from '../shared';
 import type { ResolvedNavigationIntent, RouteRegistry, UnifiedRoute } from '../types';
@@ -41,12 +41,7 @@ function EntryGuardRedirect({ intent }: { intent: ResolvedNavigationIntent<any> 
   useEffect(() => clearBypassNextPath(intent.path));
   return (
     <RRRedirect
-      to={{
-        pathname: intent.pathname,
-        search: stringifyQueryParams(intent.query),
-        hash: intent.hash ? `#${normalizeHash(intent.hash)}` : '',
-        state: intent.state,
-      }}
+      to={toLocationDescriptor(intent)}
     />
   );
 }

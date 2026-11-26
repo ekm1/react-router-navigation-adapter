@@ -29,7 +29,7 @@ import {
   normalizeHash,
   normalizePathname,
   parseQueryString,
-  stringifyQueryParams,
+  toLocationDescriptor,
 } from '../pathUtils';
 import {
   backAtRoot,
@@ -40,7 +40,7 @@ import {
   resolveTargetFromRoute,
   runGuard,
 } from '../shared';
-import { registerImperativeRouter, toImperativeLocation } from '../imperative';
+import { createImperativeRouter, registerImperativeRouter } from '../imperative';
 import { useStableRouteContext } from '../stableContext';
 
 /** `useLayoutEffect` in the browser, `useEffect` during SSR (no warning). */
@@ -48,7 +48,6 @@ const useIsomorphicLayoutEffect = typeof window !== 'undefined' ? useLayoutEffec
 import type {
   BackAtRootContext,
   GetUserConfirmation,
-  ImperativeRouter,
   NavigationGuardAction,
   NavigationGuardCallback,
   NavigationListener,
@@ -210,14 +209,8 @@ function toUnifiedRoute<TName extends string>(
   };
 }
 
-function toLocation(resolved: Pick<ResolvedNavigationIntent, 'pathname' | 'query' | 'hash' | 'state'>): LocationDescriptorObject {
-  return {
-    pathname: resolved.pathname,
-    search: stringifyQueryParams(resolved.query),
-    hash: resolved.hash ? `#${normalizeHash(resolved.hash)}` : '',
-    state: resolved.state,
-  };
-}
+const toLocation = (resolved: Pick<ResolvedNavigationIntent, 'pathname' | 'query' | 'hash' | 'state'>): LocationDescriptorObject =>
+  toLocationDescriptor(resolved);
 
 const defaultConfirm: GetUserConfirmation = (message, callback) =>
   callback(
@@ -271,9 +264,55 @@ function createWebController<TName extends string>(
     return null;
   };
 
-  const invokeExternal = (action: NavigationGuardAction, url: string) => {
-    const fn = internal.onExternal!;
-    if (internal.runGuards(action, () => fn(url), url)) fn(url);
+  /** Resolves an in-app target, or hands an external one to `onExternal` (guarded) and returns null. */
+  const resolveInternal = (
+    action: NavigationGuardAction,
+    target: NavigationTarget<TName>,
+    params?: RouteParams,
+    options?: NavigationOptions,
+  ): ResolvedNavigationIntent<TName> | null => {
+    const resolved = resolveForNavigation(target, params, options);
+    const extUrl = getExternalUrl(target, resolved);
+    if (extUrl === null) return resolved;
+    const open = internal.onExternal!;
+    if (internal.runGuards(action, () => open(extUrl), extUrl)) open(extUrl);
+    return null;
+  };
+
+  /**
+   * `go`/`goBack` past the first tracked entry. A controlled host that did not say whether it can
+   * go back (and with no `parent` / `onBackAtRoot` to use) gets the back intent itself.
+   */
+  const backPastStart = (hostBack: () => void) => {
+    const hostDecides =
+      internal.isControlled &&
+      internal.controlledCanGoBack === undefined &&
+      !internal.onBackAtRoot &&
+      !registry.resolveParent(route, routeContext);
+    if (hostDecides) hostBack();
+    else
+      backAtRoot(
+        registry,
+        route,
+        controller,
+        internal.onBackAtRoot,
+        (proceed) => internal.runGuards('goBack', proceed),
+        routeContext,
+      );
+  };
+
+  /** Makes `entries` the history stack (a controlled host only receives the last one). */
+  const writeStack = (entries: ResolvedNavigationIntent<TName>[]) => {
+    if (entries.length === 0) return;
+    if (internal.isControlled) {
+      internal.resetStack(0);
+      history.replace(toLocation(entries[entries.length - 1]));
+      return;
+    }
+    entries.forEach((resolved, idx) =>
+      idx === 0 ? history.replace(toLocation(resolved)) : history.push(toLocation(resolved)),
+    );
+    internal.resetStack(entries.length - 1);
   };
 
   const controller: RouterController<TName> = {
@@ -282,12 +321,8 @@ function createWebController<TName extends string>(
     buildUrl: (target, params, options) =>
       resolveTargetFromRoute(registry, route, target, params, options, routeContext).path,
     navigate: (target, params, options) => {
-      const resolved = resolveForNavigation(target, params, options);
-      const extUrl = getExternalUrl(target, resolved);
-      if (extUrl !== null) {
-        invokeExternal('navigate', extUrl);
-        return;
-      }
+      const resolved = resolveInternal('navigate', target, params, options);
+      if (!resolved) return;
       internal.pendingActionRef.current = 'navigate';
       try {
         // Same location: update in place instead of stacking a duplicate entry (like <Link>).
@@ -298,109 +333,49 @@ function createWebController<TName extends string>(
       }
     },
     push: (target, params, options) => {
-      const resolved = resolveForNavigation(target, params, options);
-      const extUrl = getExternalUrl(target, resolved);
-      if (extUrl !== null) {
-        invokeExternal('push', extUrl);
-        return;
-      }
-      history.push(toLocation(resolved));
+      const resolved = resolveInternal('push', target, params, options);
+      if (resolved) history.push(toLocation(resolved));
     },
     replace: (target, params, options) => {
-      const resolved = resolveForNavigation(target, params, options);
-      const extUrl = getExternalUrl(target, resolved);
-      if (extUrl !== null) {
-        invokeExternal('replace', extUrl);
-        return;
-      }
-      history.replace(toLocation(resolved));
+      const resolved = resolveInternal('replace', target, params, options);
+      if (resolved) history.replace(toLocation(resolved));
     },
     canGoBack: () => internal.canGoBack(),
     getLength: () => internal.length(),
     go: (delta) => {
       if (delta >= 0) return;
       if (-delta <= internal.depth()) history.go(delta);
-      else if (
-        internal.isControlled &&
-        internal.controlledCanGoBack === undefined &&
-        !internal.onBackAtRoot &&
-        !registry.resolveParent(route, routeContext)
-      ) {
-        history.go(delta);
-      } else
-        backAtRoot(
-          registry,
-          route,
-          controller,
-          internal.onBackAtRoot,
-          (proceed) => internal.runGuards('goBack', proceed),
-          routeContext,
-        );
+      else backPastStart(() => history.go(delta));
     },
     goBack: () => {
       if (internal.canGoBack()) history.goBack();
-      else if (
-        internal.isControlled &&
-        internal.controlledCanGoBack === undefined &&
-        !internal.onBackAtRoot &&
-        !registry.resolveParent(route, routeContext)
-      ) {
-        history.goBack();
-      } else
-        backAtRoot(
-          registry,
-          route,
-          controller,
-          internal.onBackAtRoot,
-          (proceed) => internal.runGuards('goBack', proceed),
-          routeContext,
-        );
+      else backPastStart(() => history.goBack());
     },
     reset: (targets, index) => {
       if (!targets || targets.length === 0) return;
-      const last = index === undefined ? targets.length - 1 : Math.max(0, Math.min(index, targets.length - 1));
-      const keptTargets = targets.slice(0, last + 1);
-      const active = keptTargets.map((entry) =>
+      const lastIdx = index === undefined ? targets.length - 1 : Math.max(0, Math.min(index, targets.length - 1));
+      const kept = targets.slice(0, lastIdx + 1);
+      const active = kept.map((entry) =>
         typeof entry === 'string'
           ? resolveTargetFromRoute(registry, route, entry, undefined, undefined, routeContext)
           : resolveTargetFromRoute(registry, route, entry.name, entry.params, entry, routeContext),
       );
-      if (active.length > 0) {
-        const lastIdx = active.length - 1;
-        const guardEval = resolveEntryGuardChain(registry, active[lastIdx], routeContext);
-        if (guardEval.kind === 'redirect') active[lastIdx] = guardEval.intent;
-      }
-      const lastActive = active[active.length - 1];
-      const extUrl = lastActive
-        ? getExternalUrl(keptTargets[keptTargets.length - 1] as NavigationTarget<TName>, lastActive)
-        : null;
+      // Entry guards apply to the focused (last) entry only.
+      const guardEval = resolveEntryGuardChain(registry, active[lastIdx], routeContext);
+      if (guardEval.kind === 'redirect') active[lastIdx] = guardEval.intent;
+      const extUrl = getExternalUrl(kept[lastIdx] as NavigationTarget<TName>, active[lastIdx]);
+
       const run = () =>
         withBypass(() => {
-          if (extUrl !== null) {
-            const registered = active.slice(0, -1).filter((r) => r.name !== null);
-            if (registered.length > 0) {
-              if (internal.isControlled) {
-                internal.resetStack(0);
-                history.replace(toLocation(registered[registered.length - 1]));
-              } else {
-                registered.forEach((resolved, idx) =>
-                  idx === 0 ? history.replace(toLocation(resolved)) : history.push(toLocation(resolved)),
-                );
-                internal.resetStack(registered.length - 1);
-              }
-            }
-            internal.onExternal!(extUrl);
-          } else if (internal.isControlled) {
-            internal.resetStack(0);
-            history.replace(toLocation(lastActive));
+          if (extUrl === null) {
+            writeStack(active);
           } else {
-            active.forEach((resolved, idx) =>
-              idx === 0 ? history.replace(toLocation(resolved)) : history.push(toLocation(resolved)),
-            );
-            internal.resetStack(active.length - 1);
+            // Keep the registered entries before the external one, then hand off to the host.
+            writeStack(active.slice(0, -1).filter((r) => r.name !== null));
+            internal.onExternal!(extUrl);
           }
         });
-      if (internal.runGuards('reset', run, extUrl ?? lastActive?.path)) run();
+      if (internal.runGuards('reset', run, extUrl ?? active[lastIdx].path)) run();
     },
     setParams: (partial) => {
       const resolved = resolveParamsUpdate(registry, route, partial, routeContext);
@@ -706,28 +681,9 @@ function WebRouterBridge<TName extends string>({
     const getCurrentRoute = () => toUnifiedRoute(history.location, routesRef.current, routeContextRef.current);
     const getCurrentController = () =>
       createWebController(routesRef.current, history, internal, getCurrentRoute(), routeContextRef.current);
-    const handle: ImperativeRouter<TName> = {
-      platform: 'web',
-      getLocation: () => toImperativeLocation(getCurrentRoute()),
-      getRoute: () => getCurrentRoute(),
-      subscribe: (listener) =>
-        history.listen((loc, action) =>
-          listener(toImperativeLocation(toUnifiedRoute(loc, routesRef.current, routeContextRef.current)), action),
-        ),
-      navigate: (...args) => getCurrentController().navigate(...args),
-      push: (...args) => getCurrentController().push(...args),
-      replace: (...args) => getCurrentController().replace(...args),
-      goBack: () => getCurrentController().goBack(),
-      go: (delta) => getCurrentController().go(delta),
-      canGoBack: () => getCurrentController().canGoBack(),
-      getLength: () => getCurrentController().getLength(),
-      reset: (...args) => getCurrentController().reset(...args),
-      setParams: (partial) => getCurrentController().setParams(partial),
-      setQuery: (...args) => getCurrentController().setQuery(...args),
-      buildUrl: (...args) => getCurrentController().buildUrl(...args),
-      openExternal: (...args) => getCurrentController().openExternal(...args),
-      reload: () => getCurrentController().reload(),
-    };
+    const handle = createImperativeRouter<TName>('web', getCurrentRoute, getCurrentController, (listener) =>
+      history.listen((loc, action) => listener(toUnifiedRoute(loc, routesRef.current, routeContextRef.current), action)),
+    );
     return registerImperativeRouter(handle, routerRef);
   }, [history, internal, routerRef]);
 

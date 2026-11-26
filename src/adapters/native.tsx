@@ -48,14 +48,13 @@ import {
   resolveTargetFromRoute,
   runGuard,
 } from '../shared';
-import { registerImperativeRouter, toImperativeLocation } from '../imperative';
+import { createImperativeRouter, registerImperativeRouter } from '../imperative';
 import { pickPattern } from '../routeRegistry';
 import { useStableRouteContext } from '../stableContext';
 import type {
   BackAtRootContext,
   GetUserConfirmation,
   HistoryAction,
-  ImperativeRouter,
   NavigationGuardAction,
   NavigationGuardCallback,
   NavigationListener,
@@ -392,6 +391,13 @@ function packParams(
   return Object.keys(meta).length > 0 ? { ...resolved.params, [META_KEY]: meta } : { ...resolved.params };
 }
 
+/** `'a#b'` → `{ rest: 'a', hash: 'b' }`; null for non-strings and values without `#`. */
+function splitHash(value: unknown): { rest: string; hash: string } | null {
+  if (typeof value !== 'string') return null;
+  const idx = value.indexOf('#');
+  return idx === -1 ? null : { rest: value.slice(0, idx), hash: value.slice(idx + 1) };
+}
+
 /**
  * Converts a React Navigation route into the unified route. Params that are not path params of
  * the route are query params: React Navigation linking puts `?type=million` flat into params.
@@ -422,37 +428,25 @@ export function unpackNativeRoute<TName extends string>(
     }
   }
 
+  // Stock React Navigation linking (no `withHashLinking`) leaves `#frag` on the last param value.
   let fallbackHash = '';
   if (!meta.hash) {
-    const flatKeys = Object.keys(flatQuery);
-    if (flatKeys.length > 0) {
-      const lastKey = flatKeys[flatKeys.length - 1];
-      const lastVal = flatQuery[lastKey];
-      if (typeof lastVal === 'string') {
-        const hashIdx = lastVal.indexOf('#');
-        if (hashIdx !== -1) {
-          fallbackHash = lastVal.slice(hashIdx + 1);
-          flatQuery[lastKey] = lastVal.slice(0, hashIdx);
-        }
-      } else if (Array.isArray(lastVal) && lastVal.length > 0) {
-        const tail = lastVal[lastVal.length - 1];
-        const hashIdx = tail.indexOf('#');
-        if (hashIdx !== -1) {
-          fallbackHash = tail.slice(hashIdx + 1);
-          flatQuery[lastKey] = [...lastVal.slice(0, -1), tail.slice(0, hashIdx)];
-        }
+    const queryKeys = Object.keys(flatQuery);
+    if (queryKeys.length > 0) {
+      const key = queryKeys[queryKeys.length - 1];
+      const value = flatQuery[key];
+      const split = splitHash(Array.isArray(value) ? value[value.length - 1] : value);
+      if (split) {
+        fallbackHash = split.hash;
+        flatQuery[key] = Array.isArray(value) ? [...value.slice(0, -1), split.rest] : split.rest;
       }
     } else if (rawPathParamOrder.length > 0) {
-      const lastKey = rawPathParamOrder[rawPathParamOrder.length - 1];
-      const rawVal = raw[lastKey];
-      if (typeof rawVal === 'string') {
-        const hashIdx = rawVal.indexOf('#');
-        if (hashIdx !== -1) {
-          fallbackHash = rawVal.slice(hashIdx + 1);
-          const cleaned = rawVal.slice(0, hashIdx);
-          const parse = definition?.parse?.[lastKey];
-          params[lastKey] = parse ? parse(cleaned) : cleaned;
-        }
+      const key = rawPathParamOrder[rawPathParamOrder.length - 1];
+      const split = splitHash(raw[key]);
+      if (split) {
+        fallbackHash = split.hash;
+        const parse = definition?.parse?.[key];
+        params[key] = parse ? parse(split.rest) : split.rest;
       }
     }
   }
@@ -1308,26 +1302,7 @@ export function NativeRouterProvider<TName extends string = string>({
         getCurrentRoute(),
         routeContextRef.current,
       );
-    const handle: ImperativeRouter<TName> = {
-      platform: 'native',
-      getLocation: () => toImperativeLocation(getCurrentRoute()),
-      getRoute: () => getCurrentRoute(),
-      subscribe: (listener) =>
-        internal.subscribe((r, action) => listener(toImperativeLocation(r), action)),
-      navigate: (...args) => getCurrentController().navigate(...args),
-      push: (...args) => getCurrentController().push(...args),
-      replace: (...args) => getCurrentController().replace(...args),
-      goBack: () => getCurrentController().goBack(),
-      go: (delta) => getCurrentController().go(delta),
-      canGoBack: () => getCurrentController().canGoBack(),
-      getLength: () => getCurrentController().getLength(),
-      reset: (...args) => getCurrentController().reset(...args),
-      setParams: (partial) => getCurrentController().setParams(partial),
-      setQuery: (...args) => getCurrentController().setQuery(...args),
-      buildUrl: (...args) => getCurrentController().buildUrl(...args),
-      openExternal: (...args) => getCurrentController().openExternal(...args),
-      reload: () => getCurrentController().reload(),
-    };
+    const handle = createImperativeRouter<TName>('native', getCurrentRoute, getCurrentController, internal.subscribe);
     return registerImperativeRouter(handle, routerRef);
   }, [containerRef, internal, routerRef]);
 

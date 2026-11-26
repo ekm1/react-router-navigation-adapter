@@ -1,6 +1,6 @@
 import { Redirect as RRRedirect } from 'react-router-dom';
 import { useRoute, useRouteRegistry } from '../hooks';
-import { normalizeHash, stringifyQueryParams } from '../pathUtils';
+import { toLocationDescriptor } from '../pathUtils';
 import { resolveTargetFromRoute } from '../shared';
 import type { RedirectProps } from '../types';
 
@@ -14,12 +14,7 @@ export function Redirect<TName extends string = string>({ to, params, query, has
   return (
     <RRRedirect
       push={push}
-      to={{
-        pathname: resolved.pathname,
-        search: stringifyQueryParams(resolved.query),
-        hash: resolved.hash ? `#${normalizeHash(resolved.hash)}` : '',
-        state: resolved.state,
-      }}
+      to={toLocationDescriptor(resolved)}
     />
   );
 }

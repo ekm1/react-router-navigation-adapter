@@ -151,45 +151,77 @@ export function parseRelativeUrl(url: string): ParsedUrl {
   };
 }
 
+/** `'#frag'` for a hash with or without its `#`, `''` for none. */
+export function formatHash(hash?: string | null): string {
+  const clean = normalizeHash(hash);
+  return clean ? `#${clean}` : '';
+}
+
+/** history v4 location descriptor for a resolved target (`{ pathname, search, hash, state }`). */
+export function toLocationDescriptor(target: {
+  pathname: string;
+  query: QueryInput | QueryParams;
+  hash?: string;
+  state?: unknown;
+}): { pathname: string; search: string; hash: string; state: unknown } {
+  return {
+    pathname: target.pathname,
+    search: stringifyQueryParams(target.query),
+    hash: formatHash(target.hash),
+    state: target.state,
+  };
+}
+
 export function formatRelativeUrl(
   pathname: string,
   query?: QueryInput | QueryParams,
   hash?: string,
 ): string {
   const cleanPathname = pathname ? (pathname.startsWith('/') ? pathname : `/${pathname}`) : '/';
-  const search = stringifyQueryParams(query);
-  const cleanHash = normalizeHash(hash);
-  return `${cleanPathname}${search}${cleanHash ? `#${cleanHash}` : ''}`;
+  return `${cleanPathname}${stringifyQueryParams(query)}${formatHash(hash)}`;
 }
 
+/** All param names of a pattern (`:id`, `:tab?`, `*`), in order. */
 export function extractParamNames(pattern: string): string[] {
-  const names: string[] = [];
-  const clean = pattern.replace(/^\/+|\/+$/g, '');
-  if (!clean) return names;
-
-  for (const segment of clean.split('/')) {
-    if (segment === '*') {
-      names.push('*');
-    } else if (segment.startsWith(':')) {
-      const name = segment.endsWith('?') ? segment.slice(1, -1) : segment.slice(1);
-      if (name) names.push(name);
-    }
-  }
-  return names;
+  return compileSegments(pattern).paramNames.filter(Boolean);
 }
 
+/** Param names a pattern cannot be built without (`:id`, not `:tab?` or `*`). */
 export function extractRequiredParamNames(pattern: string): string[] {
-  const names: string[] = [];
-  const clean = pattern.replace(/^\/+|\/+$/g, '');
-  if (!clean) return names;
+  return pattern
+    .split('/')
+    .filter((segment) => segment.length > 1 && segment.startsWith(':') && !segment.endsWith('?'))
+    .map((segment) => segment.slice(1));
+}
 
-  for (const segment of clean.split('/')) {
-    if (segment.startsWith(':') && !segment.endsWith('?')) {
-      const name = segment.slice(1);
-      if (name) names.push(name);
+/** Regex source for a pattern's segments (`/static`, `/:param`, `/:param?`, `/*`) plus its param names. */
+function compileSegments(pattern: string): { body: string; paramNames: string[] } {
+  const paramNames: string[] = [];
+  let body = '';
+  const trimmed = pattern.replace(/^\/+|\/+$/g, '');
+  if (!trimmed) return { body, paramNames };
+  for (const segment of trimmed.split('/')) {
+    if (segment === '*') {
+      paramNames.push('*');
+      body += '(?:/(.*))?';
+    } else if (segment.startsWith(':') && segment.endsWith('?')) {
+      paramNames.push(segment.slice(1, -1));
+      body += '(?:/([^/]+))?';
+    } else if (segment.startsWith(':')) {
+      paramNames.push(segment.slice(1));
+      body += '/([^/]+)';
+    } else {
+      body += `/${escapeRegex(segment)}`;
     }
   }
-  return names;
+  return { body, paramNames };
+}
+
+/** End-of-pattern regex: exact (optionally strict about a trailing slash) or prefix match. */
+function patternEnd(pattern: string, exact: boolean, strict: boolean): string {
+  if (!exact) return '(?=/|$)';
+  if (!strict) return '/?$';
+  return pattern.endsWith('/') ? '/$' : '$';
 }
 
 export function compilePathPattern(
@@ -197,55 +229,12 @@ export function compilePathPattern(
   options: MatchPathOptions = {},
 ): CompiledPattern {
   const { exact = true, strict = false, sensitive = false } = options;
-  const paramNames: string[] = [];
-
+  const flags = sensitive ? '' : 'i';
   if (pattern === '/' || pattern === '') {
-    const regexStr = exact ? (strict ? '^/$' : '^/?$') : '^/';
-    return {
-      pattern,
-      paramNames,
-      regex: new RegExp(regexStr, sensitive ? '' : 'i'),
-    };
+    return { pattern, paramNames: [], regex: new RegExp(exact ? (strict ? '^/$' : '^/?$') : '^/', flags) };
   }
-
-  const hasTrailingSlash = pattern.endsWith('/');
-  const trimmed = pattern.replace(/^\/+|\/+$/g, '');
-  const segments = trimmed.split('/');
-
-  let regexBody = '';
-  for (const segment of segments) {
-    if (segment === '*') {
-      paramNames.push('*');
-      regexBody += '(?:/(.*))?';
-    } else if (segment.startsWith(':') && segment.endsWith('?')) {
-      const name = segment.slice(1, -1);
-      paramNames.push(name);
-      regexBody += '(?:/([^/]+))?';
-    } else if (segment.startsWith(':')) {
-      const name = segment.slice(1);
-      paramNames.push(name);
-      regexBody += '/([^/]+)';
-    } else {
-      regexBody += `/${escapeRegex(segment)}`;
-    }
-  }
-
-  let suffix: string;
-  if (exact) {
-    if (strict) {
-      suffix = hasTrailingSlash ? '/$' : '$';
-    } else {
-      suffix = '/?$';
-    }
-  } else {
-    suffix = '(?=/|$)';
-  }
-
-  return {
-    pattern,
-    paramNames,
-    regex: new RegExp(`^${regexBody}${suffix}`, sensitive ? '' : 'i'),
-  };
+  const { body, paramNames } = compileSegments(pattern);
+  return { pattern, paramNames, regex: new RegExp(`^${body}${patternEnd(pattern, exact, strict)}`, flags) };
 }
 
 /**
@@ -258,34 +247,11 @@ export function compileOverlaySuffixPattern(
   options: MatchPathOptions = {},
 ): CompiledPattern {
   const { strict = false, sensitive = false } = options;
-  const paramNames: string[] = [];
-  const hasTrailingSlash = pattern.endsWith('/');
-  const trimmed = pattern.replace(/^\/+|\/+$/g, '');
-  const segments = trimmed.split('/').filter(Boolean);
-
-  let regexBody = '';
-  for (const segment of segments) {
-    if (segment === '*') {
-      paramNames.push('*');
-      regexBody += '(?:/(.*))?';
-    } else if (segment.startsWith(':') && segment.endsWith('?')) {
-      const name = segment.slice(1, -1);
-      paramNames.push(name);
-      regexBody += '(?:/([^/]+))?';
-    } else if (segment.startsWith(':')) {
-      const name = segment.slice(1);
-      paramNames.push(name);
-      regexBody += '/([^/]+)';
-    } else {
-      regexBody += `/${escapeRegex(segment)}`;
-    }
-  }
-
-  const suffix = strict ? (hasTrailingSlash ? '/$' : '$') : '/?$';
+  const { body, paramNames } = compileSegments(pattern);
   return {
     pattern,
     paramNames,
-    regex: new RegExp(`^(.*)${regexBody}${suffix}`, sensitive ? '' : 'i'),
+    regex: new RegExp(`^(.*)${body}${patternEnd(pattern, true, strict)}`, sensitive ? '' : 'i'),
   };
 }
 
