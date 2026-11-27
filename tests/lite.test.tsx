@@ -155,15 +155,15 @@ describe.each<Platform>(['web', 'native'])('compact layer on plain app routes (%
     expect(text('path')).toBe('/myBets/7');
   });
 
-  it('goBack at the root: LiteConfig onBackAtRoot, else the fallback', () => {
+  it('goBack at the root: fallback first, else LiteConfig onBackAtRoot', () => {
     const onBackAtRoot = vi.fn();
     const { unmount } = renderApp(platform, '/myBets/5', { config: { onBackAtRoot } });
     act(() => captured.router!.goBack('/myBets'));
+    expect(onBackAtRoot).not.toHaveBeenCalled();
+    expect(visible('mybets')).toBeTruthy();
+    act(() => captured.router!.goBack());
     expect(onBackAtRoot).toHaveBeenCalledTimes(1);
     unmount();
-    renderApp(platform, '/myBets/5');
-    act(() => captured.router!.goBack('/myBets'));
-    expect(visible('mybets')).toBeTruthy();
   });
 
   it('guards: back and pushes away are blocked until confirmed; query-only changes pass', () => {

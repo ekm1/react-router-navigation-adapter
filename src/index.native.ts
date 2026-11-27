@@ -12,6 +12,7 @@ export {
   useRouteRegistry,
   createTypedRouterHooks,
 } from './hooks';
+export { createRouterRef, getRouter } from './imperative';
 export { Redirect } from './components/Redirect';
 export { Link } from './components/Link.native';
 export { RouterView } from './components/RouterView.native';
@@ -59,5 +60,5 @@ export type {
 } from './compat.native';
 export { Prompt } from './components/Prompt';
 export type { PromptProps } from './components/Prompt';
-export { createLinking, getStateFromUrl, unpackNativeRoute } from './adapters/native';
+export { createLinking, getStateFromUrl, unpackNativeRoute, withHashLinking } from './adapters/native';
 export type * from './types';

@@ -1,6 +1,8 @@
 import { useEffect, useRef } from 'react';
 import { useUniversalRouterContext } from './context';
+import { resolveLinkActive, resolveTargetFromRoute, toLinkLocation } from './shared';
 import type {
+  LinkIsActive,
   NavigationGuardCallback,
   NavigationListener,
   NavigationTarget,
@@ -99,22 +101,18 @@ export function useNavigationListener(listener: NavigationListener): void {
 
 /**
  * Whether `to` is the current location, like React Router's `NavLink`: a pathname prefix
- * match by default, or an exact one with `{ exact: true }`.
+ * match by default, or an exact one with `{ exact: true }`, with optional `strict`,
+ * `sensitive`, and custom `isActive(match, location)`.
  */
 export function useIsActive(
   to: NavigationTarget,
   params?: RouteParams,
-  options: { exact?: boolean } = {},
+  options: { exact?: boolean; strict?: boolean; sensitive?: boolean; isActive?: LinkIsActive } = {},
 ): boolean {
-  const { registry } = useUniversalRouterContext();
-  const current = trimSlash(useRoute().pathname.toLowerCase());
-  const target = trimSlash(registry.resolveTarget(to, params).pathname.toLowerCase());
-  if (current === target) return true;
-  return !options.exact && current.startsWith(target === '/' ? '/' : `${target}/`);
-}
-
-function trimSlash(pathname: string): string {
-  return pathname.length > 1 ? pathname.replace(/\/+$/, '') : pathname;
+  const { registry, routeContext } = useUniversalRouterContext();
+  const currentRoute = useRoute();
+  const resolved = resolveTargetFromRoute(registry, currentRoute, to, params, undefined, routeContext);
+  return resolveLinkActive(resolved.pathname, toLinkLocation(currentRoute), options);
 }
 
 /**

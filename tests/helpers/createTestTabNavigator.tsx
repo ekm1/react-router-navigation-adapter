@@ -32,15 +32,19 @@ function TestTabNavigator({
   initialRouteName,
   children,
   screenOptions,
+  ...rest
 }: {
   initialRouteName?: string;
   children: React.ReactNode;
   screenOptions?: any;
+  backBehavior?: 'firstRoute' | 'initialRoute' | 'order' | 'history' | 'none';
+  [key: string]: any;
 }) {
   const { state, descriptors, NavigationContent } = useNavigationBuilder(TabRouter, {
     initialRouteName,
     children,
     screenOptions,
+    ...rest,
   });
   return (
     <NavigationContent>

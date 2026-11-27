@@ -2,7 +2,7 @@ import React, { useMemo } from 'react';
 import { useUniversalRouterContext } from './context';
 import { useRoute, useRouter } from './hooks';
 import { useGuardRegistration } from './adapters/native';
-import { compilePathPattern, generatePathFromPattern, normalizeHash, safeDecode, stringifyQueryParams } from './pathUtils';
+import { compilePathPattern, formatHash, generatePathFromPattern, safeDecode, stringifyQueryParams } from './pathUtils';
 import { promptToGuard, type PromptMessage } from './shared';
 import type { HistoryAction, RouteParams, UnifiedRoute } from './types';
 
@@ -101,7 +101,7 @@ function toUrl(to: CompatLocationDescriptor, current: CompatLocation): string {
     return `${resolvePathname(path, current.pathname)}${idx === -1 ? '' : to.slice(idx)}`;
   }
   const search = to.search ? (to.search.startsWith('?') ? to.search : `?${to.search}`) : '';
-  const hash = to.hash ? `#${normalizeHash(to.hash)}` : '';
+  const hash = formatHash(to.hash);
   const pathname = to.pathname ? resolvePathname(to.pathname, current.pathname) : current.pathname;
   return `${pathname}${search}${hash}`;
 }

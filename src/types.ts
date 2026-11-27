@@ -1,4 +1,4 @@
-import type { ComponentType, ReactNode } from 'react';
+import type { ComponentType, ReactElement, ReactNode } from 'react';
 
 export type PlatformKind = 'web' | 'native';
 
@@ -17,9 +17,27 @@ export type QueryInputValue =
 
 export type QueryInput = Record<string, QueryInputValue>;
 
+export type NativeOverlayPresentation =
+  | 'modal'
+  | 'transparentModal'
+  | 'fullScreenModal'
+  | 'containedModal'
+  | 'containedTransparentModal';
+
+export type EntryGuardResult<TName extends string = string> =
+  | true
+  | void
+  | NavigationTarget<TName>
+  | ReactElement;
+
+export type EntryGuard<TName extends string = string> = (
+  route: UnifiedRoute<TName>,
+  context?: unknown,
+) => EntryGuardResult<TName>;
+
 export interface RouteConfigInput {
-  /** URL path pattern used on web (React Router v5) and for deep-link matching on native. E.g. "/users/:id" */
-  path: string;
+  /** One or more URL path patterns used on web (React Router v5) and for deep-link matching on native. E.g. "/users/:id" or ["/items", "/items/:id"] */
+  path: string | readonly string[];
   /** Whether the path must match exactly on web (defaults to true). */
   exact?: boolean;
   /** Strict trailing slash matching on web (defaults to false). */
@@ -42,22 +60,47 @@ export interface RouteConfigInput {
   native?: boolean;
   /**
    * Native only: route names of the navigators this screen is nested in, from the outer
-   * `<RouterView>` navigator inwards (e.g. `['Tabs', 'MyBetsTab']`). Used for deep links into
+   * `<RouterView>` navigator inwards (e.g. `['Tabs', 'HomeTab']`). Used for deep links into
    * nested navigators and for navigating into tabs/stacks that are not mounted yet.
    * Mounted navigators are found without it.
    */
   nestedIn?: string[];
   /**
    * Where `goBack()` goes when there is no history to go back to (e.g. after a deep link).
-   * Used when the provider has no `onBackAtRoot` handler.
    */
   parent?: NavigationTarget<any> | ((route: UnifiedRoute<any>) => NavigationTarget<any>);
+  /**
+   * When true, `path` matches as a segment-aligned suffix of any URL pathname (replacing
+   * React Router leading wildcards such as `"*\/preview/:previewId"`). On web, the underlying
+   * base route keeps rendering with the overlay on top. On native, it pushes as a modal screen.
+   */
+  overlay?: boolean;
+  /**
+   * Native only: modal presentation style for `overlay: true` routes (defaults to `'transparentModal'`).
+   */
+  overlayPresentation?: NativeOverlayPresentation;
+  /**
+   * Runtime availability predicate evaluated at match time (with optional `<RouterProvider routeContext>`).
+   * Disabled routes are skipped during matching as if unregistered.
+   */
+  enabled?: boolean | ((context?: any) => boolean);
+  /**
+   * Route-level entry guard evaluated before entering / rendering the route.
+   * - `true` / `undefined`: allow entry and render `component`.
+   * - `ReactElement`: stay at the URL and render the returned element in place of `component`.
+   * - `NavigationTarget`: redirect (replace) to the target route or URL.
+   */
+  guard?: EntryGuard<any>;
 }
 
 export interface RouteDefinition<TName extends string = string>
-  extends RouteConfigInput {
+  extends Omit<RouteConfigInput, 'path'> {
   /** Canonical screen name used by React Navigation and target-by-name navigation. */
   name: TName;
+  /** Primary (first) URL path pattern for this route. */
+  path: string;
+  /** All URL path patterns for this route in declaration order (always non-empty). */
+  paths: readonly string[];
   exact: boolean;
 }
 
@@ -126,6 +169,10 @@ export interface UnifiedRoute<
   key?: string;
   /** Matched route path pattern (e.g. "/users/:id"), or null if unmatched. */
   matchedPattern: string | null;
+  /** True when this route is an active `overlay: true` route. */
+  isOverlay?: boolean;
+  /** Underlying base pathname when `isOverlay` is true (e.g. "/projects/42" or "/"). */
+  basePathname?: string;
 }
 
 export interface SetQueryOptions {
@@ -184,6 +231,45 @@ export type NavigationGuardCallback = (
   context: NavigationGuardContext,
 ) => boolean | string | void;
 
+export interface ExternalNavigationOptions {
+  /** On web without `onExternal`, uses `window.location.replace(url)` instead of `assign(url)`. */
+  replace?: boolean;
+}
+
+export interface ImperativeLocation {
+  pathname: string;
+  search: string;
+  hash: string;
+  query: QueryParams;
+  path: string;
+  state?: unknown;
+  key?: string;
+}
+
+export interface ImperativeRouter<TName extends string = string> {
+  readonly platform: PlatformKind;
+  getLocation: () => ImperativeLocation;
+  getRoute: () => UnifiedRoute<TName>;
+  subscribe: (listener: (location: ImperativeLocation, action: HistoryAction) => void) => () => void;
+  navigate: RouterController<TName>['navigate'];
+  push: RouterController<TName>['push'];
+  replace: RouterController<TName>['replace'];
+  goBack: RouterController<TName>['goBack'];
+  go: RouterController<TName>['go'];
+  canGoBack: RouterController<TName>['canGoBack'];
+  getLength: RouterController<TName>['getLength'];
+  reset: RouterController<TName>['reset'];
+  setParams: RouterController<TName>['setParams'];
+  setQuery: RouterController<TName>['setQuery'];
+  buildUrl: RouterController<TName>['buildUrl'];
+  openExternal: (url: string, options?: ExternalNavigationOptions) => void;
+  reload: () => void;
+}
+
+export interface RouterHandle<TName extends string = string> {
+  current: ImperativeRouter<TName> | null;
+}
+
 export interface RouterController<TName extends string = string> {
   /**
    * Go to a route or URL. Adds a history entry (web: `history.push`, native stack: `push`),
@@ -210,8 +296,8 @@ export interface RouterController<TName extends string = string> {
     options?: NavigationOptions,
   ) => void;
   /**
-   * Go back one entry. With no history (e.g. opened from a deep link) it calls the
-   * provider's `onBackAtRoot`, or replaces with the route's `parent` when there is none.
+   * Go back one entry. With no history (e.g. opened from a deep link) it replaces with the
+   * route's `parent` first, or calls the provider's `onBackAtRoot` when there is no `parent`.
    */
   goBack: () => void;
   /**
@@ -235,6 +321,18 @@ export interface RouterController<TName extends string = string> {
     params?: RouteParams,
     options?: NavigationOptions,
   ) => string;
+  /**
+   * Navigate to an external URL outside the router (runs active leave guards first).
+   * - Web: calls `onExternal(url)` if configured, else `window.location.assign(url)` (or `replace(url)` when `options.replace` is true).
+   * - Native: calls `onExternal(url)` / `openWeb(url)` (throws if neither is configured).
+   */
+  openExternal: (url: string, options?: ExternalNavigationOptions) => void;
+  /**
+   * Reload the current view (runs active leave guards first).
+   * - Web: calls `onReload()` if configured, else `window.location.reload()`.
+   * - Native: calls `onReload()` if configured, else logs a warning and no-ops.
+   */
+  reload: () => void;
   /** Snapshot of the currently active route. */
   route: UnifiedRoute<TName>;
   /** Active platform implementation ("web" or "native"). */
@@ -249,6 +347,14 @@ export interface RouteMatchResult<TName extends string = string> {
   params: RouteParams;
   query: QueryParams;
   hash: string;
+  isOverlay?: boolean;
+  basePathname?: string;
+}
+
+export interface OverlayMatchResult<TName extends string = string> {
+  overlay: RouteMatchResult<TName>;
+  base: RouteMatchResult<TName> | null;
+  basePathname: string;
 }
 
 export interface ResolvedNavigationIntent<TName extends string = string> {
@@ -259,10 +365,23 @@ export interface ResolvedNavigationIntent<TName extends string = string> {
   state: unknown;
   pathname: string;
   path: string;
+  /** Specific pattern matched or selected when the route defines multiple paths. */
+  matchedPattern?: string;
+  /** True when targeting an `overlay: true` route. */
+  isOverlay?: boolean;
+  /** Base pathname beneath the overlay when known. */
+  basePathname?: string;
+}
+
+export interface LinkingScreenAlias {
+  path: string;
+  exact?: boolean;
+  parse?: Record<string, (value: string) => any>;
 }
 
 export interface LinkingScreenConfig {
   path?: string;
+  alias?: Array<string | LinkingScreenAlias>;
   exact?: boolean;
   parse?: Record<string, (value: string) => any>;
   stringify?: Record<string, (value: any) => string>;
@@ -281,19 +400,24 @@ export interface RouteRegistry<TName extends string = string> {
   readonly routes: ReadonlyArray<RouteDefinition<TName>>;
   getRoute: (name: string) => RouteDefinition<TName> | undefined;
   hasRoute: (name: string) => boolean;
+  /** Returns whether `name` is currently enabled for the given `context`. */
+  isRouteEnabled: (name: string, context?: unknown) => boolean;
   getParamNames: (name: string) => string[];
   buildPath: (
     name: TName,
     params?: RouteParams,
     options?: Omit<NavigationOptions, 'state'>,
   ) => string;
-  matchUrl: (url: string) => RouteMatchResult<TName> | null;
+  matchUrl: (url: string, context?: unknown) => RouteMatchResult<TName> | null;
+  /** Match an `overlay: true` suffix on `url`, returning both the overlay match and the underlying base route match. */
+  matchOverlayUrl: (url: string, context?: unknown) => OverlayMatchResult<TName> | null;
   /** Resolve a route's `parent` (see `RouteConfigInput.parent`), or null. */
-  resolveParent: (route: UnifiedRoute<TName>) => ResolvedNavigationIntent<TName> | null;
+  resolveParent: (route: UnifiedRoute<TName>, context?: unknown) => ResolvedNavigationIntent<TName> | null;
   resolveTarget: (
     target: NavigationTarget<TName>,
     params?: RouteParams,
     options?: NavigationOptions,
+    context?: unknown,
   ) => ResolvedNavigationIntent<TName>;
   toLinkingConfig: (prefixes?: string[]) => ReactNavigationLinkingConfig;
 }
@@ -316,6 +440,35 @@ export interface RouterAdapter<TName extends string = string> {
   useListen: () => (listener: NavigationListener) => () => void;
   /** Action of the most recent location change. */
   useLastAction: () => HistoryAction;
+}
+
+export interface LinkMatch<
+  Params extends Record<string, string | undefined> = Record<string, string | undefined>,
+> {
+  params: Params;
+  isExact: boolean;
+  path: string;
+  url: string;
+}
+
+export interface LinkLocation {
+  pathname: string;
+  search: string;
+  hash: string;
+  state?: unknown;
+  key?: string;
+}
+
+export type LinkIsActive = (match: LinkMatch | null, location: LinkLocation) => boolean;
+
+export interface WebLinkComponentProps {
+  href?: string;
+  navigate: () => void;
+  onClick?: (event?: any) => void;
+  className?: string;
+  style?: any;
+  children?: ReactNode;
+  [key: string]: any;
 }
 
 export interface CommonLinkProps<TName extends string = string> {
@@ -342,6 +495,14 @@ export interface CommonLinkProps<TName extends string = string> {
   activeStyle?: any;
   /** Active only on an exact pathname match (defaults to false: prefix match, like `NavLink`). */
   exact?: boolean;
+  /** When true, trailing slashes are significant when matching active state. */
+  strict?: boolean;
+  /** When true, active pathname matching is case-sensitive. */
+  sensitive?: boolean;
+  /** Custom active-state predicate matching React Router v5 `NavLink` (`(match, location) => boolean`). */
+  isActive?: LinkIsActive;
+  /** Web: custom anchor renderer receiving `{ href, navigate, onClick, ...props }` (like React Router v5 `<Link component>`). Ignored on native. */
+  component?: ComponentType<any>;
 }
 
 export interface RedirectProps<TName extends string = string> {
